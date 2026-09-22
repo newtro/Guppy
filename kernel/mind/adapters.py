@@ -33,8 +33,10 @@ class BrainAdapter:
     id = "base"
 
     def __init__(self, *, cwd: str, instructions: str, model: str | None = None, effort: str | None = None,
-                 autonomy: str = "bypass"):
+                 autonomy: str = "bypass", mcp_servers: list[dict] | None = None, deny_paths: list[str] | None = None):
         self.cwd, self.instructions, self.model, self.effort, self.autonomy = cwd, instructions, model, effort, autonomy
+        self.mcp_servers = mcp_servers or []  # [{name, command, args}] from kernel.capabilities
+        self.deny_paths = deny_paths or []    # absolute dirs the agent must not edit (best effort per CLI)
         self.proc: asyncio.subprocess.Process | None = None
 
     @classmethod
@@ -83,6 +85,12 @@ class ClaudeAdapter(BrainAdapter):
             args += ["--permission-mode", "bypassPermissions"]
         if self.model:
             args += ["--model", self.model]
+        if self.mcp_servers:
+            args += ["--mcp-config", json.dumps({"mcpServers": {
+                s["name"]: {"command": s["command"], "args": s["args"]} for s in self.mcp_servers}})]
+        if self.deny_paths:  # deny rules still apply in bypassPermissions mode
+            deny = [f"{tool}({p}/**)" for p in self.deny_paths for tool in ("Edit", "Write", "MultiEdit", "NotebookEdit")]
+            args += ["--settings", json.dumps({"permissions": {"deny": deny}})]
         await self._spawn(*args)
         await self._write({"type": "user", "message": {"role": "user", "content": goal}})
         self.proc.stdin.close()  # single turn per task
@@ -114,7 +122,11 @@ class CodexAdapter(BrainAdapter):
     id, binary = "codex", "codex"
 
     async def run(self, goal: str) -> AsyncIterator[BrainEvent]:
-        await self._spawn("codex", "app-server")
+        overrides = []
+        for srv in self.mcp_servers:
+            overrides += ["-c", f"mcp_servers.{srv['name']}.command={json.dumps(srv['command'])}",
+                          "-c", f"mcp_servers.{srv['name']}.args={json.dumps(srv['args'])}"]
+        await self._spawn("codex", *overrides, "app-server")
         rid = 0
 
         async def req(method, params):
@@ -194,7 +206,8 @@ class GrokAdapter(BrainAdapter):
         async for d in self._lines():
             m = d.get("method")
             if d.get("id") == 1 and "result" in d:
-                await req("session/new", {"cwd": self.cwd, "mcpServers": []})
+                await req("session/new", {"cwd": self.cwd, "mcpServers": [
+                    {"name": m["name"], "command": m["command"], "args": m["args"], "env": []} for m in self.mcp_servers]})
             elif d.get("id") == 2 and "result" in d:
                 session_id = d["result"]["sessionId"]
                 yield BrainEvent("ready", {"session_id": session_id})

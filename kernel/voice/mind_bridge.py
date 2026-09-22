@@ -14,6 +14,7 @@ from pipecat.processors.frameworks.rtvi import RTVIServerMessageFrame
 from pipecat.services.llm_service import FunctionCallParams
 
 from kernel.mind.tasks import TaskManager
+from kernel.selfmod import SelfMod
 
 TOOLS = ToolsSchema(standard_tools=[
     FunctionSchema(
@@ -30,6 +31,23 @@ TOOLS = ToolsSchema(standard_tools=[
     FunctionSchema(
         name="mind_status",
         description="List the Mind's active and recent tasks with their status and summaries.",
+        properties={}, required=[],
+    ),
+    FunctionSchema(
+        name="improve_self",
+        description="Change Guppy himself: add a new ability (a capability/tool), change his personality or behavior, "
+                    "or fix one of his own features. The kernel tests the change and only ships it if every check passes.",
+        properties={"goal": {"type": "string", "description": "What to change or add, complete and self-contained."}},
+        required=["goal"],
+    ),
+    FunctionSchema(
+        name="undo_last_change",
+        description="Revert the most recent self-modification that went live.",
+        properties={}, required=[],
+    ),
+    FunctionSchema(
+        name="list_changes",
+        description="List recent self-modifications and whether they shipped.",
         properties={}, required=[],
     ),
     FunctionSchema(
@@ -56,8 +74,11 @@ def report_message(task: dict) -> dict:
 class MindBridge:
     """One per voice session."""
 
-    def __init__(self, tasks: TaskManager, llm, worker_ref):
-        self.tasks, self.llm, self.worker_ref = tasks, llm, worker_ref
+    def __init__(self, tasks: TaskManager, selfmod: SelfMod, llm, worker_ref):
+        self.tasks, self.selfmod, self.llm, self.worker_ref = tasks, selfmod, llm, worker_ref
+        llm.register_function("improve_self", self._improve)
+        llm.register_function("undo_last_change", self._undo)
+        llm.register_function("list_changes", self._changes)
         llm.register_function("delegate_to_mind", self._delegate)
         llm.register_function("mind_status", self._status)
         llm.register_function("cancel_mind_task", self._cancel)
@@ -80,6 +101,36 @@ class MindBridge:
         await params.result_callback({"tasks": [
             {"id": t["id"], "goal": t["goal"][:100], "status": t["status"], "summary": t.get("summary")} for t in rows]})
 
+    async def _improve(self, params: FunctionCallParams):
+        goal = params.arguments.get("goal", "").strip()
+        if not goal:
+            return await params.result_callback({"error": "goal is required"})
+        change = await self.selfmod.request(goal, provenance="admiral")
+        await params.result_callback({"change_id": change["id"], "status": change["status"]})
+
+    async def _undo(self, params: FunctionCallParams):
+        change = await self.selfmod.undo_last()
+        await params.result_callback({"reverted": change["id"] if change else None,
+                                      "status": change["status"] if change else "nothing to undo"})
+
+    async def _changes(self, params: FunctionCallParams):
+        await params.result_callback({"changes": [
+            {"id": c["id"], "goal": c["goal"][:100], "status": c["status"], "reason": (c.get("reason") or "")[:200]}
+            for c in self.selfmod.list(limit=5)]})
+
+    async def on_change(self, change: dict, event: str):
+        w = self.worker
+        if not w:
+            return
+        await w.queue_frames([RTVIServerMessageFrame(data={"type": "change", "event": event, "change": {
+            k: change.get(k) for k in ("id", "goal", "status", "reason")}})])
+        if event in ("promoted", "rejected", "reverted", "revert_failed"):
+            verdict = {"promoted": "passed every check and is now live",
+                       "rejected": "was rejected by the kernel and did not ship",
+                       "reverted": "was rolled back", "revert_failed": "needs the Admiral: automatic rollback failed"}[event]
+            msg = f"[Mind report] Self-modification {change['id']} ({change['goal'][:100]}) {verdict}. {change.get('reason') or ''}"
+            await w.queue_frames([LLMMessagesAppendFrame(messages=[{"role": "user", "content": msg[:700]}], run_llm=True)])
+
     async def _cancel(self, params: FunctionCallParams):
         ok = await self.tasks.cancel(int(params.arguments.get("task_id", 0)))
         await params.result_callback({"cancelled": ok})
@@ -90,7 +141,7 @@ class MindBridge:
         if not w:
             return
         await w.queue_frames([RTVIServerMessageFrame(data={"type": "task", "event": event, "task": hud(task)})])
-        if event in ("done", "failed"):
+        if event in ("done", "failed") and task.get("role") != "selfmod":  # self-mods report via on_change
             await self.report(task)
 
     async def report(self, task: dict):
@@ -102,5 +153,5 @@ class MindBridge:
         w = self.worker
         for t in self.tasks.list(limit=10, active_only=True):
             await w.queue_frames([RTVIServerMessageFrame(data={"type": "task", "event": t["status"], "task": hud(t)})])
-        for t in self.tasks.unreported():
+        for t in [t for t in self.tasks.unreported() if t.get("role") != "selfmod"]:
             await self.report(t)

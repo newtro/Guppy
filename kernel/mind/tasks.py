@@ -15,6 +15,7 @@ from pathlib import Path
 
 from loguru import logger
 
+from kernel.capabilities import healthy_specs
 from kernel.mind.adapters import ADAPTERS, BrainEvent
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -52,6 +53,7 @@ class TaskManager:
         self.listeners: list[Listener] = []
         self.running: dict[int, asyncio.Task] = {}
         self.adapters: dict[int, object] = {}
+        self.overrides: dict[int, dict] = {}  # per-task: cwd, extra_instructions, deny_paths
         self._sem: asyncio.Semaphore | None = None
 
     @property
@@ -81,7 +83,12 @@ class TaskManager:
         return [dict(r) for r in self.db.execute("select * from task_events where task_id=? order by ts", (task_id,))]
 
     # ---- commands ----
-    async def submit(self, goal: str, role: str = "general", provenance: str = "admiral", provider: str | None = None) -> dict:
+    async def wait(self, task_id: int):
+        if (t := self.running.get(task_id)):
+            await asyncio.shield(t)
+
+    async def submit(self, goal: str, role: str = "general", provenance: str = "admiral", provider: str | None = None,
+                     overrides: dict | None = None) -> dict:
         cfg = self.config
         provider = provider or cfg["roles"].get(role, cfg["default_provider"])
         cur = self.db.execute(
@@ -89,6 +96,7 @@ class TaskManager:
             (goal, role, provider, provenance, time.time()))
         self.db.commit()
         task = self.get(cur.lastrowid)
+        self.overrides[task["id"]] = overrides or {}
         logger.info(f"Mind task #{task['id']} queued ({role} -> {provider}): {goal[:80]}")
         await self._notify(task, "queued")
         self.running[task["id"]] = asyncio.create_task(self._run(task["id"]))
@@ -124,6 +132,8 @@ class TaskManager:
         cfg = self.config
         self._sem = self._sem or asyncio.Semaphore(cfg.get("max_concurrent_tasks", 3))
         task = self.get(task_id)
+        ov = self.overrides.pop(task_id, {})
+        instructions = self.instructions() + ("\n" + ov["extra_instructions"] if ov.get("extra_instructions") else "")
         order = [task["provider"]] + [p for p in cfg["fallback_order"] if p != task["provider"]]
         order = [p for p in order if p in ADAPTERS and ADAPTERS[p].available()]
         try:
@@ -131,10 +141,12 @@ class TaskManager:
                 self._update(task_id, status="running", started=time.time())
                 await self._notify(self.get(task_id), "running")
                 last_error = "no provider available"
+                capabilities = await healthy_specs(BODY)
                 for provider in order:
                     pcfg = cfg["providers"].get(provider, {})
-                    adapter = ADAPTERS[provider](cwd=cfg["workdir"], instructions=self.instructions(),
-                                                 model=pcfg.get("model"), effort=pcfg.get("effort"), autonomy=cfg["autonomy"])
+                    adapter = ADAPTERS[provider](cwd=ov.get("cwd", cfg["workdir"]), instructions=instructions,
+                                                 model=pcfg.get("model"), effort=pcfg.get("effort"), autonomy=cfg["autonomy"],
+                                                 mcp_servers=capabilities, deny_paths=ov.get("deny_paths"))
                     self.adapters[task_id] = adapter
                     self._update(task_id, provider=provider)
                     did_work, end = False, None

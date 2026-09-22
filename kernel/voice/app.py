@@ -39,6 +39,7 @@ from pipecat.transports.smallwebrtc.transport import SmallWebRTCTransport
 from pipecat.workers.runner import WorkerRunner
 
 from kernel.mind.tasks import TaskManager
+from kernel.selfmod import SelfMod
 from kernel.voice.mind_bridge import TOOLS, MindBridge
 from kernel.voice.services import GuppyTTSService, MoodTagProcessor, ParakeetSTTService
 
@@ -101,8 +102,9 @@ async def run_bot(connection: SmallWebRTCConnection):
     worker = PipelineWorker(pipeline, params=PipelineParams(
         audio_in_sample_rate=16000, audio_out_sample_rate=24000, enable_metrics=True))
 
-    bridge = MindBridge(tasks, llm, lambda: worker)
+    bridge = MindBridge(tasks, selfmod, llm, lambda: worker)
     tasks.listeners.append(bridge.on_task)
+    selfmod.listeners.append(bridge.on_change)
 
     @worker.rtvi.event_handler("on_client_ready")
     async def on_client_ready(rtvi):
@@ -118,6 +120,7 @@ async def run_bot(connection: SmallWebRTCConnection):
     async def on_client_disconnected(transport, client):
         logger.info("Admiral disconnected")
         tasks.listeners.remove(bridge.on_task)
+        selfmod.listeners.remove(bridge.on_change)
         await runner.cancel()
 
     await runner.run()
@@ -125,6 +128,7 @@ async def run_bot(connection: SmallWebRTCConnection):
 
 webrtc = SmallWebRTCRequestHandler()
 tasks = TaskManager()
+selfmod = SelfMod(tasks)
 state: dict = {}
 
 
@@ -180,6 +184,21 @@ async def get_task(task_id: int):
 @app.post("/api/tasks/{task_id}/cancel")
 async def cancel_task(task_id: int):
     return {"cancelled": await tasks.cancel(task_id)}
+
+
+@app.get("/api/changes")
+async def list_changes(limit: int = 10):
+    return selfmod.list(limit=limit)
+
+
+@app.post("/api/changes")
+async def create_change(body: dict):
+    return await selfmod.request(body["goal"], provenance=body.get("provenance", "admiral"))
+
+
+@app.post("/api/changes/undo")
+async def undo_change():
+    return await selfmod.undo_last() or {"status": "nothing to undo"}
 
 
 @app.get("/test.wav")

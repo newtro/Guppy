@@ -4,13 +4,25 @@
     "general": "claude",
     "coding": "claude",
     "research": "grok",
-    "review": "codex"
+    "review": "codex",
+    "selfmod": "claude"
   },
-  "fallback_order": ["claude", "grok", "codex"],
+  "fallback_order": [
+    "claude",
+    "grok",
+    "codex"
+  ],
   "providers": {
-    "claude": { "model": null },
-    "codex":  { "model": null, "effort": "medium" },
-    "grok":   { "model": null }
+    "claude": {
+      "model": null
+    },
+    "codex": {
+      "model": null,
+      "effort": "medium"
+    },
+    "grok": {
+      "model": null
+    }
   },
   "autonomy": "bypass",
   "workdir": "/Volumes/Cache/repos",

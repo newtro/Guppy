@@ -12,6 +12,8 @@ dependencies = [
   "fastapi",
   "uvicorn",
   "httpx",
+  "mcp",
+  "pytest",
 ]
 
 [tool.uv]
