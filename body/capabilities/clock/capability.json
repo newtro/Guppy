@@ -1,0 +1,10 @@
+{
+  "name": "clock",
+  "description": "Tells Guppy the current local date and time, and the time in any IANA timezone.",
+  "effects": {
+    "now": "read",
+    "time_in": "read",
+    "list_timezones": "read"
+  },
+  "enabled": true
+}
