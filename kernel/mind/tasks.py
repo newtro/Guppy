@@ -15,7 +15,9 @@ from pathlib import Path
 
 from loguru import logger
 
-from kernel.capabilities import healthy_specs
+import os
+
+from kernel.capabilities import gated, healthy_specs
 from kernel.mind.adapters import ADAPTERS, BrainEvent
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -141,7 +143,8 @@ class TaskManager:
                 self._update(task_id, status="running", started=time.time())
                 await self._notify(self.get(task_id), "running")
                 last_error = "no provider available"
-                capabilities = await healthy_specs(BODY)
+                kernel_url = f"http://127.0.0.1:{os.environ.get('GUPPY_PORT', '8765')}"
+                capabilities = gated(await healthy_specs(BODY), task_id, kernel_url)
                 for provider in order:
                     pcfg = cfg["providers"].get(provider, {})
                     adapter = ADAPTERS[provider](cwd=ov.get("cwd", cfg["workdir"]), instructions=instructions,

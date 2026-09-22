@@ -77,6 +77,13 @@ async def health_check(spec: dict, timeout: float = 30) -> tuple[bool, str, list
             await proc.wait()
 
 
+def gated(specs: list[dict], task_id: int, kernel_url: str) -> list[dict]:
+    """Route each capability through the kernel gateway for this task (see kernel/gateway.py)."""
+    gw = str(Path(__file__).parent / "gateway.py")
+    return [{**s, "args": [gw, "--task", str(task_id), "--cap-dir", s["cwd"], "--kernel", kernel_url, "--",
+                           s["command"], *s["args"]]} for s in specs]
+
+
 async def healthy_specs(body: Path) -> list[dict]:
     specs = load_specs(body)
     results = await asyncio.gather(*(health_check(s) for s in specs))

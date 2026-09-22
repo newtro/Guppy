@@ -15,7 +15,7 @@ from pathlib import Path
 
 import httpx
 import uvicorn
-from fastapi import BackgroundTasks, FastAPI
+from fastapi import BackgroundTasks, FastAPI, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
@@ -38,6 +38,7 @@ from pipecat.transports.smallwebrtc.request_handler import (
 from pipecat.transports.smallwebrtc.transport import SmallWebRTCTransport
 from pipecat.workers.runner import WorkerRunner
 
+from kernel.gate import Gate
 from kernel.mind.tasks import TaskManager
 from kernel.selfmod import SelfMod
 from kernel.voice.mind_bridge import TOOLS, MindBridge
@@ -102,9 +103,10 @@ async def run_bot(connection: SmallWebRTCConnection):
     worker = PipelineWorker(pipeline, params=PipelineParams(
         audio_in_sample_rate=16000, audio_out_sample_rate=24000, enable_metrics=True))
 
-    bridge = MindBridge(tasks, selfmod, llm, lambda: worker)
+    bridge = MindBridge(tasks, selfmod, gate, llm, lambda: worker)
     tasks.listeners.append(bridge.on_task)
     selfmod.listeners.append(bridge.on_change)
+    gate.listeners.append(bridge.on_action)
 
     @worker.rtvi.event_handler("on_client_ready")
     async def on_client_ready(rtvi):
@@ -121,6 +123,7 @@ async def run_bot(connection: SmallWebRTCConnection):
         logger.info("Admiral disconnected")
         tasks.listeners.remove(bridge.on_task)
         selfmod.listeners.remove(bridge.on_change)
+        gate.listeners.remove(bridge.on_action)
         await runner.cancel()
 
     await runner.run()
@@ -129,6 +132,7 @@ async def run_bot(connection: SmallWebRTCConnection):
 webrtc = SmallWebRTCRequestHandler()
 tasks = TaskManager()
 selfmod = SelfMod(tasks)
+gate = Gate(tasks, lambda: tasks.config)
 state: dict = {}
 
 
@@ -184,6 +188,27 @@ async def get_task(task_id: int):
 @app.post("/api/tasks/{task_id}/cancel")
 async def cancel_task(task_id: int):
     return {"cancelled": await tasks.cancel(task_id)}
+
+
+@app.post("/api/gate/call")
+async def gate_call(body: dict, request: Request):
+    """Called by kernel/gateway.py for every capability tool call. May block (hold / confirmation)."""
+    if request.client.host != "127.0.0.1":
+        return {"decision": "deny", "reason": "gate is local-only"}
+    return await gate.decide(int(body["task_id"]), body["capability"], body["tool"], body.get("effect", "act"),
+                             body.get("arguments", {}), gateway_tainted=bool(body.get("tainted")))
+
+
+@app.post("/api/gate/taint")
+async def gate_taint(body: dict):
+    gate.taint(int(body["task_id"]), body.get("capability", ""), body.get("tool", ""))
+    return {"ok": True}
+
+
+@app.get("/api/gate/actions")
+async def gate_actions(limit: int = 20):
+    return gate.list(limit=limit)
+# Deliberately no HTTP endpoint to confirm or cancel actions: only the Admiral's voice can.
 
 
 @app.get("/api/changes")

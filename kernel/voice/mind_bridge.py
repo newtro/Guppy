@@ -13,6 +13,7 @@ from pipecat.frames.frames import LLMMessagesAppendFrame
 from pipecat.processors.frameworks.rtvi import RTVIServerMessageFrame
 from pipecat.services.llm_service import FunctionCallParams
 
+from kernel.gate import Gate, describe
 from kernel.mind.tasks import TaskManager
 from kernel.selfmod import SelfMod
 
@@ -51,6 +52,19 @@ TOOLS = ToolsSchema(standard_tools=[
         properties={}, required=[],
     ),
     FunctionSchema(
+        name="confirm_action",
+        description="The Admiral approves a pending Mind action (say yes to an '[Action request]'). "
+                    "Only call this when the Admiral clearly says yes, confirm, approve, or go ahead.",
+        properties={"action_id": {"type": "integer", "description": "The action number; omit for the latest pending one."}},
+        required=[],
+    ),
+    FunctionSchema(
+        name="cancel_action",
+        description="Stop a pending Mind action (an '[Action request]' or an action in its hold window).",
+        properties={"action_id": {"type": "integer", "description": "The action number; omit for the latest pending one."}},
+        required=[],
+    ),
+    FunctionSchema(
         name="cancel_mind_task",
         description="Stop a running Mind task.",
         properties={"task_id": {"type": "integer", "description": "The task number."}},
@@ -74,8 +88,10 @@ def report_message(task: dict) -> dict:
 class MindBridge:
     """One per voice session."""
 
-    def __init__(self, tasks: TaskManager, selfmod: SelfMod, llm, worker_ref):
-        self.tasks, self.selfmod, self.llm, self.worker_ref = tasks, selfmod, llm, worker_ref
+    def __init__(self, tasks: TaskManager, selfmod: SelfMod, gate: Gate, llm, worker_ref):
+        self.tasks, self.selfmod, self.gate, self.llm, self.worker_ref = tasks, selfmod, gate, llm, worker_ref
+        llm.register_function("confirm_action", self._confirm)
+        llm.register_function("cancel_action", self._cancel_action)
         llm.register_function("improve_self", self._improve)
         llm.register_function("undo_last_change", self._undo)
         llm.register_function("list_changes", self._changes)
@@ -130,6 +146,31 @@ class MindBridge:
                        "reverted": "was rolled back", "revert_failed": "needs the Admiral: automatic rollback failed"}[event]
             msg = f"[Mind report] Self-modification {change['id']} ({change['goal'][:100]}) {verdict}. {change.get('reason') or ''}"
             await w.queue_frames([LLMMessagesAppendFrame(messages=[{"role": "user", "content": msg[:700]}], run_llm=True)])
+
+    def _pending(self, params: FunctionCallParams) -> dict | None:
+        aid = params.arguments.get("action_id")
+        return self.gate.get(int(aid)) if aid else self.gate.latest_pending()
+
+    async def _confirm(self, params: FunctionCallParams):
+        a = self._pending(params)
+        ok = bool(a) and self.gate.resolve(a["id"], True, "confirmed by the Admiral")
+        await params.result_callback({"confirmed": a["id"] if ok else None, "note": None if ok else "nothing pending"})
+
+    async def _cancel_action(self, params: FunctionCallParams):
+        a = self._pending(params)
+        ok = bool(a) and self.gate.resolve(a["id"], False, "cancelled by the Admiral")
+        await params.result_callback({"cancelled": a["id"] if ok else None, "note": None if ok else "nothing pending"})
+
+    async def on_action(self, action: dict, event: str):
+        w = self.worker
+        if not w:
+            return
+        await w.queue_frames([RTVIServerMessageFrame(data={"type": "action", "event": event, "action": {
+            "id": action["id"], "what": describe(action), "status": action["status"], "tainted": bool(action["tainted"])}})])
+        if event == "awaiting_confirmation":
+            msg = (f"[Action request] Action {action['id']}: the Mind wants to {describe(action)}. This task read external "
+                   f"content, so the Admiral must approve. Ask the Admiral to confirm or cancel, in one short sentence.")
+            await w.queue_frames([LLMMessagesAppendFrame(messages=[{"role": "user", "content": msg}], run_llm=True)])
 
     async def _cancel(self, params: FunctionCallParams):
         ok = await self.tasks.cancel(int(params.arguments.get("task_id", 0)))

@@ -19,6 +19,7 @@ body/capabilities/<name>/
   "name": "clock",
   "description": "One line: what this gives Guppy.",
   "effects": { "now": "read" },
+  "taints": [],
   "enabled": true
 }
 ```
@@ -28,6 +29,16 @@ body/capabilities/<name>/
 - `read`: only reads (status, lookups, search)
 - `draft`: creates something private and reversible (a draft email, a local file)
 - `act`: changes the outside world (sends, publishes, deploys, updates a ticket)
+
+`taints` lists the tools that return **external content** someone else wrote (email bodies, web pages, ticket
+text, comments). Once a task calls one, the task is tainted for good: its `act` calls then need the Admiral's
+spoken confirmation. When in doubt, list it.
+
+## The gate (enforced by the kernel, not by you)
+
+Every tool call goes through the kernel's gateway. `read` and `draft` always run. `act` runs after a short
+cancellable hold on a clean task, and needs the Admiral's spoken "yes" on a tainted task. A blocked call returns
+an error that starts with "Blocked by Guppy's kernel". Don't try to route around it; report it.
 
 ## server.py (mcp 2.x, which renamed FastMCP to MCPServer)
 

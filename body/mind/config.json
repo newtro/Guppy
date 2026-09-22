@@ -27,5 +27,9 @@
   "autonomy": "bypass",
   "workdir": "/Volumes/Cache/repos",
   "max_concurrent_tasks": 3,
-  "task_timeout_s": 1800
+  "task_timeout_s": 1800,
+  "gate": {
+    "act_hold_s": 15,
+    "confirm_timeout_s": 300
+  }
 }
