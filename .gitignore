@@ -21,3 +21,4 @@ tripo-out/
 # Local tooling
 .claude/launch.json
 .DS_Store
+.run/

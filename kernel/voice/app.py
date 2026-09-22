@@ -1,0 +1,163 @@
+"""Guppy Reflex voice loop.
+
+    .venv/bin/python -m kernel.voice.app        # then open http://127.0.0.1:8765
+
+Browser (mic w/ echo cancellation, avatar) <-WebRTC-> Pipecat pipeline:
+  Silero VAD + Smart Turn v3 -> Parakeet STT -> local LLM (mlx_lm.server) -> mood tags -> Guppy TTS
+Barge-in: speaking over Guppy interrupts TTS (VAD user-start interrupts the bot).
+"""
+import asyncio
+import os
+import subprocess
+import sys
+from contextlib import asynccontextmanager
+from pathlib import Path
+
+import httpx
+import uvicorn
+from fastapi import BackgroundTasks, FastAPI
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
+from loguru import logger
+
+from pipecat.audio.vad.silero import SileroVADAnalyzer
+from pipecat.audio.vad.vad_analyzer import VADParams
+from pipecat.frames.frames import LLMRunFrame
+from pipecat.pipeline.pipeline import Pipeline
+from pipecat.pipeline.worker import PipelineParams, PipelineWorker
+from pipecat.processors.aggregators.llm_context import LLMContext
+from pipecat.processors.aggregators.llm_response_universal import LLMContextAggregatorPair, LLMUserAggregatorParams
+from pipecat.services.openai.llm import OpenAILLMService
+from pipecat.transports.base_transport import TransportParams
+from pipecat.transports.smallwebrtc.connection import SmallWebRTCConnection
+from pipecat.transports.smallwebrtc.request_handler import (
+    SmallWebRTCPatchRequest,
+    SmallWebRTCRequest,
+    SmallWebRTCRequestHandler,
+)
+from pipecat.transports.smallwebrtc.transport import SmallWebRTCTransport
+from pipecat.workers.runner import WorkerRunner
+
+from kernel.voice.services import GuppyTTSService, MoodTagProcessor, ParakeetSTTService
+
+ROOT = Path(__file__).resolve().parents[2]
+BODY = ROOT / "body"
+UI = Path(__file__).parent / "ui"
+LLM_MODEL = os.environ.get("GUPPY_REFLEX_MODEL", "mlx-community/Qwen3.5-9B-MLX-4bit")
+LLM_PORT = int(os.environ.get("GUPPY_REFLEX_PORT", "8081"))
+LLM_URL = f"http://127.0.0.1:{LLM_PORT}/v1"
+
+
+def persona() -> str:
+    return (BODY / "persona" / "guppy.md").read_text()  # re-read per session: Guppy may edit it
+
+
+async def ensure_reflex_llm() -> subprocess.Popen | None:
+    """Start mlx_lm.server unless one is already listening, then warm the weights."""
+    proc = None
+    async with httpx.AsyncClient() as http:
+        try:
+            await http.get(f"{LLM_URL}/models", timeout=1)
+        except httpx.HTTPError:
+            (ROOT / ".run").mkdir(exist_ok=True)
+            log = open(ROOT / ".run" / "reflex_llm.log", "a")
+            proc = subprocess.Popen(
+                [sys.executable, "-m", "mlx_lm.server", "--model", LLM_MODEL, "--host", "127.0.0.1",
+                 "--port", str(LLM_PORT), "--chat-template-args", '{"enable_thinking": false}', "--max-tokens", "300"],
+                stdout=log, stderr=subprocess.STDOUT)
+            for _ in range(300):
+                try:
+                    await http.get(f"{LLM_URL}/models", timeout=1); break
+                except httpx.HTTPError:
+                    await asyncio.sleep(1)
+        # mlx_lm.server loads weights lazily on the first completion
+        await http.post(f"{LLM_URL}/chat/completions", timeout=600, json={
+            "model": LLM_MODEL, "max_tokens": 1, "messages": [{"role": "user", "content": "hi"}]})
+    logger.info(f"Reflex LLM ready: {LLM_MODEL}")
+    return proc
+
+
+async def run_bot(connection: SmallWebRTCConnection):
+    transport = SmallWebRTCTransport(
+        webrtc_connection=connection,
+        params=TransportParams(audio_in_enabled=True, audio_out_enabled=True),
+    )
+    stt = ParakeetSTTService()
+    llm = OpenAILLMService(base_url=LLM_URL, api_key="local", model=LLM_MODEL)
+    tts = GuppyTTSService(voice_dir=BODY / "persona" / "voice")
+    await asyncio.gather(stt.load(), tts.load())
+
+    context = LLMContext(messages=[{"role": "system", "content": persona()}])
+    user_agg, assistant_agg = LLMContextAggregatorPair(
+        context, user_params=LLMUserAggregatorParams(
+            # 0.4s of silence before Smart Turn judges the turn: a pause after "Guppy," shouldn't end it.
+            vad_analyzer=SileroVADAnalyzer(params=VADParams(stop_secs=0.4))))
+
+    pipeline = Pipeline([
+        transport.input(), stt, user_agg, llm, MoodTagProcessor(), tts, transport.output(), assistant_agg,
+    ])
+    worker = PipelineWorker(pipeline, params=PipelineParams(
+        audio_in_sample_rate=16000, audio_out_sample_rate=24000, enable_metrics=True))
+
+    @worker.rtvi.event_handler("on_client_ready")
+    async def on_client_ready(rtvi):
+        context.add_message({"role": "user", "content": "(The Admiral has just come online. Greet the Admiral in one short sentence.)"})
+        await worker.queue_frames([LLMRunFrame()])
+
+    runner = WorkerRunner(handle_sigint=False)
+    await runner.add_workers(worker)
+
+    @transport.event_handler("on_client_disconnected")
+    async def on_client_disconnected(transport, client):
+        logger.info("Admiral disconnected")
+        await runner.cancel()
+
+    await runner.run()
+
+
+webrtc = SmallWebRTCRequestHandler()
+state: dict = {}
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    state["llm_proc"] = await ensure_reflex_llm()
+    # Preload STT + TTS so the first connection is instant.
+    await asyncio.gather(ParakeetSTTService().load(), GuppyTTSService(voice_dir=BODY / "persona" / "voice").load())
+    logger.info("Guppy is listening: http://127.0.0.1:8765")
+    yield
+    await webrtc.close()
+    if state.get("llm_proc"):
+        state["llm_proc"].terminate()
+
+
+app = FastAPI(lifespan=lifespan)
+
+
+@app.post("/api/offer")
+async def offer(request: SmallWebRTCRequest, background_tasks: BackgroundTasks):
+    async def on_connection(connection: SmallWebRTCConnection):
+        background_tasks.add_task(run_bot, connection)
+    return await webrtc.handle_web_request(request=request, webrtc_connection_callback=on_connection)
+
+
+@app.patch("/api/offer")
+async def ice(request: SmallWebRTCPatchRequest):
+    await webrtc.handle_patch_request(request)
+    return {"status": "success"}
+
+
+@app.get("/")
+async def index():
+    return FileResponse(UI / "index.html", headers={"Cache-Control": "no-store"})
+
+
+@app.get("/test.wav")
+async def test_wav():  # spoken test prompt for ?test mode (generated locally, see .run/)
+    return FileResponse(ROOT / ".run" / "test.wav")
+
+
+app.mount("/avatar", StaticFiles(directory=BODY / "avatar"), name="avatar")
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="127.0.0.1", port=int(os.environ.get("GUPPY_PORT", "8765")))

@@ -1,0 +1,18 @@
+[project]
+name = "guppy"
+version = "0.1.0"
+description = "Local-first realtime voice assistant (Bobiverse Guppy)"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "pipecat-ai[silero,webrtc,local-smart-turn-v3]==1.11.0",
+  "mlx-lm==0.31.3",
+  "mlx-audio==0.5.5",
+  "parakeet-mlx==0.5.2",
+  "soundfile",
+  "fastapi",
+  "uvicorn",
+  "httpx",
+]
+
+[tool.uv]
+package = false
