@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Guppy Avatar Spike</title>
+<style>
+  :root { --bg: #14171c; --fg: #d8dde4; --muted: #8a93a0; --accent: #e8923a; --panel: #1d2128; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg); font: 14px/1.4 system-ui, sans-serif; overflow: hidden; }
+  canvas { display: block; }
+  #hud { position: fixed; left: 16px; bottom: 16px; right: 16px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  #say { flex: 1 1 320px; min-width: 0; background: var(--panel); color: var(--fg); border: 1px solid #2c323c; border-radius: 6px; padding: 7px 10px; font: inherit; }
+  select { background: var(--panel); color: var(--fg); border: 1px solid #2c323c; border-radius: 6px; padding: 7px 8px; font: inherit; max-width: 100%; }
+  button, label.file { background: var(--panel); color: var(--fg); border: 1px solid #2c323c; border-radius: 6px; padding: 7px 12px; cursor: pointer; font: inherit; }
+  button:hover, label.file:hover { border-color: var(--accent); }
+  button.on { border-color: var(--accent); color: var(--accent); }
+  #status { color: var(--muted); margin-left: auto; font-variant-numeric: tabular-nums; }
+  input[type=file] { display: none; }
+</style>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+} }
+</script>
+</head>
+<body>
+<div id="hud">
+  <input id="say" type="text" placeholder="Type a line for Guppy…" value="Aye, Admiral. Voice module online. Try not to break it.">
+  <button id="sayBtn">🗣 Say</button>
+  <select id="clip" title="Voice candidate"><option value="line.wav">placeholder (macOS Ralph)</option></select>
+  <button id="speak">▶ Speak</button>
+  <button id="mic">🎙 Lip-sync mic</button>
+  <label class="file">Load audio…<input id="file" type="file" accept="audio/*"></label>
+  <button data-mood="neutral" class="on">neutral</button>
+  <button data-mood="smug">smug</button>
+  <button data-mood="exasperated">exasperated</button>
+  <button data-mood="alarmed">alarmed</button>
+  <span id="status">loading…</span>
+</div>
+<script type="module">
+import * as THREE from "three";
+import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
+
+const status = document.getElementById("status");
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(devicePixelRatio);
+renderer.setSize(innerWidth, innerHeight);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x14171c);
+scene.environment = new THREE.PMREMGenerator(renderer).fromScene(new RoomEnvironment(), 0.04).texture;
+scene.environmentIntensity = 0.5;
+const key = new THREE.DirectionalLight(0xfff1e0, 2.2); key.position.set(2, 1.5, 2); scene.add(key);
+const rim = new THREE.DirectionalLight(0x88aaff, 1.2); rim.position.set(-2, 1, -1.5); scene.add(rim);
+
+const camera = new THREE.PerspectiveCamera(28, innerWidth / innerHeight, 0.05, 20);
+// Frame the head (top ~55% of the bust) so it fits whatever the window shape is.
+const headBox = new THREE.Box3();
+function frame() {
+  camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();
+  if (headBox.isEmpty()) return;
+  const size = headBox.getSize(new THREE.Vector3()), center = headBox.getCenter(new THREE.Vector3());
+  const vFov = THREE.MathUtils.degToRad(camera.fov), hFov = 2 * Math.atan(Math.tan(vFov / 2) * camera.aspect);
+  const dist = 1.05 * Math.max((size.y / 2) / Math.tan(vFov / 2), (size.x / 2) / Math.tan(hFov / 2)) + size.z * 0.25;
+  camera.position.set(center.x + dist * 0.18, center.y + size.y * 0.05, center.z + dist);
+  camera.lookAt(center.x, center.y - size.y * 0.04, center.z);
+}
+addEventListener("resize", () => { renderer.setSize(innerWidth, innerHeight); frame(); });
+
+// morph name -> [{mesh, index}]
+const morphs = {};
+const rig = new THREE.Group(); scene.add(rig);
+new GLTFLoader().load("guppy_head.glb", (gltf) => {
+  // Blender +X (face) -> glTF +X; Blender +Z up -> glTF +Y. Turn the face toward the camera (+Z).
+  gltf.scene.rotation.y = -Math.PI / 2;
+  rig.add(gltf.scene);
+  const full = new THREE.Box3().setFromObject(gltf.scene);
+  headBox.copy(full); headBox.min.y = full.max.y - (full.max.y - full.min.y) * 0.75;
+  gltf.scene.traverse((o) => {
+    if (o.isMesh && o.morphTargetDictionary) {
+      for (const [name, index] of Object.entries(o.morphTargetDictionary)) (morphs[name] ||= []).push({ mesh: o, index });
+    }
+  });
+  frame();
+  status.textContent = "ready · morphs: " + Object.keys(morphs).join(", ");
+}, undefined, (e) => status.textContent = "load failed: " + e);
+
+window.guppy = { morphs, get cur() { return cur; } };  // debug handle
+function setMorph(name, v) { for (const m of morphs[name] || []) m.mesh.morphTargetInfluences[m.index] = v; }
+
+// ---- audio analysis -> visemes ----
+let ctx, analyser, freq, time, source, micStream, bus, liveAbort;
+const liveNodes = new Set();
+function ensureAudio() {
+  if (ctx) return;
+  ctx = new AudioContext();
+  analyser = ctx.createAnalyser(); analyser.fftSize = 1024; analyser.smoothingTimeConstant = 0.3;
+  freq = new Float32Array(analyser.frequencyBinCount); time = new Float32Array(analyser.fftSize);
+  bus = ctx.createGain(); bus.connect(analyser); analyser.connect(ctx.destination);
+}
+function stopSource() {
+  liveAbort?.abort(); liveAbort = null;
+  for (const n of liveNodes) { try { n.stop(); } catch {} } liveNodes.clear();
+  if (source && source !== bus) { try { source.stop?.(); } catch {} source.disconnect(); }
+  source = null;
+  if (micStream) {
+    micStream.getTracks().forEach(t => t.stop()); micStream = null; document.getElementById("mic").classList.remove("on");
+    analyser.connect(ctx.destination);
+  }
+}
+async function playBuffer(arrayBuf) {
+  ensureAudio(); stopSource();
+  const buf = await ctx.decodeAudioData(arrayBuf);
+  source = ctx.createBufferSource(); source.buffer = buf;
+  source.connect(bus);
+  source.start();
+}
+
+// Live: POST text to the local TTS server, play int16 PCM chunks as they stream in.
+async function say(text) {
+  ensureAudio(); stopSource(); await ctx.resume();
+  const ctl = liveAbort = new AbortController();
+  const t0 = performance.now();
+  const res = await fetch("speak", { method: "POST", body: JSON.stringify({ text }), signal: ctl.signal });
+  if (!res.ok) { status.textContent = "TTS error " + res.status; return; }
+  const sr = +res.headers.get("X-Sample-Rate") || 24000;
+  const reader = res.body.getReader();
+  let carry = new Uint8Array(0), playAt = 0, first = true;
+  source = bus;  // marks "speaking" for the animation loop
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const bytes = new Uint8Array(carry.length + value.length); bytes.set(carry); bytes.set(value, carry.length);
+      const n = bytes.length >> 1; carry = bytes.slice(n * 2);
+      if (!n) continue;
+      const pcm = new Int16Array(bytes.buffer, 0, n), f = new Float32Array(n);
+      for (let i = 0; i < n; i++) f[i] = pcm[i] / 32768;
+      const buf = ctx.createBuffer(1, n, sr); buf.copyToChannel(f, 0);
+      const node = ctx.createBufferSource(); node.buffer = buf; node.connect(bus);
+      if (first) { playAt = ctx.currentTime + 0.05; first = false; status.textContent = `first audio ${Math.round(performance.now() - t0)} ms`; }
+      node.start(Math.max(playAt, ctx.currentTime)); playAt = Math.max(playAt, ctx.currentTime) + buf.duration;
+      liveNodes.add(node); node.onended = () => liveNodes.delete(node);
+    }
+  } catch (e) { if (e.name !== "AbortError") throw e; }
+}
+const sayBox = document.getElementById("say");
+document.getElementById("sayBtn").onclick = () => sayBox.value.trim() && say(sayBox.value.trim());
+sayBox.onkeydown = (e) => { if (e.key === "Enter") document.getElementById("sayBtn").click(); };
+
+const clipSel = document.getElementById("clip");
+fetch("voices/manifest.json", { cache: "no-store" }).then(r => r.ok ? r.json() : []).then(list => {
+  for (const c of list) clipSel.add(new Option(c.label, c.file));
+  const guppy = [...clipSel.options].findIndex(o => o.value === "voices/g3_q17.wav");
+  if (guppy >= 0) clipSel.selectedIndex = guppy;
+}).catch(() => {});
+document.getElementById("speak").onclick = async () => playBuffer(await (await fetch(clipSel.value, { cache: "no-store" })).arrayBuffer());
+document.getElementById("file").onchange = async (e) => e.target.files[0] && playBuffer(await e.target.files[0].arrayBuffer());
+document.getElementById("mic").onclick = async (e) => {
+  ensureAudio();
+  if (micStream) return stopSource();
+  stopSource();
+  micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  source = ctx.createMediaStreamSource(micStream);
+  analyser.disconnect();  // don't echo the mic to the speakers
+  source.connect(analyser);
+  e.currentTarget.classList.add("on");
+};
+
+function bandEnergy(lo, hi) {
+  const hz = ctx.sampleRate / analyser.fftSize; let s = 0, n = 0;
+  for (let i = Math.floor(lo / hz); i <= Math.ceil(hi / hz) && i < freq.length; i++) { s += Math.pow(10, freq[i] / 10); n++; }
+  return s / Math.max(1, n);
+}
+
+// ---- moods ----
+const MOODS = {
+  neutral:     { mouthSmile: 0,   mouthFrown: 0,   mouthPress: 0,   sway: 1 },
+  smug:        { mouthSmile: 0.7, mouthFrown: 0,   mouthPress: 0.3, sway: 0.6 },
+  exasperated: { mouthSmile: 0,   mouthFrown: 0.8, mouthPress: 0.2, sway: 1.4 },
+  alarmed:     { mouthSmile: 0,   mouthFrown: 0.3, mouthPress: 0,   sway: 0.3, jawBias: 0.25 },
+};
+let mood = MOODS.neutral;
+document.querySelectorAll("[data-mood]").forEach(b => b.onclick = () => {
+  document.querySelectorAll("[data-mood]").forEach(x => x.classList.toggle("on", x === b));
+  mood = MOODS[b.dataset.mood];
+});
+
+// ---- per-frame drive ----
+const cur = { jawOpen: 0, mouthWide: 0, mouthRound: 0, mouthSmile: 0, mouthFrown: 0, mouthPress: 0, eyeBlink: 0 };
+let nextBlink = performance.now() + 2000, blinkStart = -1;
+const clock = new THREE.Clock();
+function approach(k, target, dt, up = 25, down = 12) {
+  const rate = target > cur[k] ? up : down; cur[k] += (target - cur[k]) * (1 - Math.exp(-rate * dt));
+}
+renderer.setAnimationLoop(() => {
+  const dt = Math.min(clock.getDelta(), 0.05), t = clock.elapsedTime, now = performance.now();
+  let level = 0, bright = 0.5;
+  if (analyser && source) {
+    analyser.getFloatTimeDomainData(time); analyser.getFloatFrequencyData(freq);
+    let rms = 0; for (const v of time) rms += v * v; rms = Math.sqrt(rms / time.length);
+    level = Math.min(1, Math.max(0, (20 * Math.log10(rms + 1e-6) + 45) / 30));  // -45dB..-15dB -> 0..1
+    const low = bandEnergy(250, 900), high = bandEnergy(1800, 5000);
+    bright = Math.min(1, Math.max(0, (high / (low + high + 1e-12) - 0.03) / 0.25));  // typical speech ratio 0.03..0.28
+  }
+  const speaking = level > 0.05;
+  approach("jawOpen", Math.min(1, level * 1.1 + (mood.jawBias || 0)), dt);
+  approach("mouthWide", speaking ? Math.min(1, level * bright * 2.2) : 0, dt);
+  approach("mouthRound", speaking ? Math.min(1, level * Math.max(0, 0.6 - bright) * 1.4) : 0, dt);
+  approach("mouthSmile", mood.mouthSmile, dt, 4, 4);
+  approach("mouthFrown", mood.mouthFrown, dt, 4, 4);
+  approach("mouthPress", speaking ? 0 : mood.mouthPress, dt, 6, 6);
+
+  // blink: 130ms close/open, every 2–6s
+  if (blinkStart < 0 && now > nextBlink) blinkStart = now;
+  if (blinkStart >= 0) {
+    const p = (now - blinkStart) / 130;
+    cur.eyeBlink = p < 1 ? p : p < 2 ? 2 - p : 0;
+    if (p >= 2) { blinkStart = -1; nextBlink = now + 2000 + Math.random() * 4000; }
+  }
+  for (const k in cur) setMorph(k, cur[k]);
+
+  // idle life: breathing + slow sway, a little nod with speech
+  const s = mood.sway;
+  rig.rotation.y = Math.sin(t * 0.31) * 0.06 * s;
+  rig.rotation.x = Math.sin(t * 0.23) * 0.02 * s - level * 0.03;
+  rig.rotation.z = Math.sin(t * 0.17) * 0.015 * s;
+  rig.position.y = Math.sin(t * 1.1) * 0.003;
+  renderer.render(scene, camera);
+});
+</script>
+</body>
+</html>

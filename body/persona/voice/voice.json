@@ -1,0 +1,17 @@
+{
+  "name": "Guppy",
+  "reference_audio": "guppy_ref.wav",
+  "reference_text": "Aye, Admiral. All systems are nominal, the sprint board is current, and I have taken the liberty of fixing the build. Again. Shall I proceed?",
+  "designed_with": {
+    "model": "mlx-community/Breeze-TTS-2-mlx-8bit",
+    "seed": 1003,
+    "cfg_scale": 4,
+    "instruct": "An older, a middle-aged male alien naval officer. Deep, gravelly, slightly wet and throaty voice with a clipped military cadence. Dry, deadpan, understated delivery; precise enunciation; unhurried. Very low pitch, heavy gravel, a little weary."
+  },
+  "live_tts": {
+    "model": "mlx-community/Qwen3-TTS-12Hz-1.7B-Base-8bit",
+    "mode": "clone",
+    "streaming_interval": 0.32
+  },
+  "notes": "Designed voice (not a clone of any real person). Breeze weights are non-commercial; the reference clip is for personal use."
+}

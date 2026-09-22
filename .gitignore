@@ -1,0 +1,23 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Generated spike output (regenerable)
+spikes/*/out/
+spikes/avatar/web/voices/
+spikes/avatar/web/line.wav
+tripo-out/
+.tripo/
+
+# Avatar model + art: Ackbar-style likeness, kept local (personal use only)
+*.glb
+*.fbx
+*.blend
+*.blend1
+*.png
+*.webp
+
+# Local tooling
+.claude/launch.json
+.DS_Store
