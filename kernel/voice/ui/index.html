@@ -18,6 +18,11 @@
   .line { background: color-mix(in srgb, var(--panel) 85%, transparent); border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; }
   .line.me { color: var(--me); align-self: flex-end; }
   .line b { color: var(--muted); font-weight: 500; margin-right: 6px; }
+  #tasks { position: fixed; right: 16px; bottom: 64px; width: min(340px, calc(100vw - 32px)); display: flex; flex-direction: column; gap: 6px; }
+  .task { background: color-mix(in srgb, var(--panel) 90%, transparent); border: 1px solid var(--line); border-left: 3px solid var(--muted);
+          border-radius: 8px; padding: 6px 10px; font-size: 13px; }
+  .task.running { border-left-color: var(--accent); } .task.done { border-left-color: #5cb85c; } .task.failed, .task.cancelled { border-left-color: #d9534f; }
+  .task .meta { color: var(--muted); font-size: 12px; }
 </style>
 <script type="importmap">
 { "imports": {
@@ -28,6 +33,7 @@
 </head>
 <body>
 <div id="log"></div>
+<div id="tasks"></div>
 <div id="hud">
   <button id="connect">🎙 Talk to Guppy</button>
   <span id="state">offline</span>
@@ -96,6 +102,18 @@ function say(who, text) {
   $("log").append(d); $("log").scrollTop = 1e9; return d;
 }
 let botLine = null;
+
+// ---------------- Mind task HUD ----------------
+const taskEls = {};
+function showTask(tk) {
+  let el = taskEls[tk.id];
+  if (!el) { el = taskEls[tk.id] = document.createElement("div"); $("tasks").prepend(el); }
+  el.className = "task " + tk.status;
+  const detail = tk.status === "running" ? (tk.tool ? `using ${tk.tool}` : "working") : (tk.summary || tk.error || tk.status);
+  el.innerHTML = `<div class="meta">#${tk.id} · ${tk.provider} · ${tk.status}</div>`;
+  el.append(tk.goal.slice(0, 90), Object.assign(document.createElement("div"), { className: "meta", textContent: detail }));
+  if (["done", "failed", "cancelled"].includes(tk.status)) setTimeout(() => { el.remove(); delete taskEls[tk.id]; }, 60000);
+}
 
 // ---------------- WebRTC ----------------
 let pc, dc, ctx, analyser, freq, time;
@@ -174,7 +192,10 @@ function onRtvi(m) {
       if (!botLine) botLine = say("guppy", "");
       botLine.append((botLine.childNodes.length > 1 ? " " : "") + (m.data?.text ?? "")); $("log").scrollTop = 1e9;
       break;
-    case "server-message": if (m.data?.type === "mood" && MOODS[m.data.mood]) mood = MOODS[m.data.mood]; break;
+    case "server-message":
+      if (m.data?.type === "mood" && MOODS[m.data.mood]) mood = MOODS[m.data.mood];
+      if (m.data?.type === "task") showTask(m.data.task);
+      break;
     case "error": setState("error: " + (m.data?.error ?? "")); break;
   }
 }

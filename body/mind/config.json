@@ -1,0 +1,19 @@
+{
+  "default_provider": "claude",
+  "roles": {
+    "general": "claude",
+    "coding": "claude",
+    "research": "grok",
+    "review": "codex"
+  },
+  "fallback_order": ["claude", "grok", "codex"],
+  "providers": {
+    "claude": { "model": null },
+    "codex":  { "model": null, "effort": "medium" },
+    "grok":   { "model": null }
+  },
+  "autonomy": "bypass",
+  "workdir": "/Volumes/Cache/repos",
+  "max_concurrent_tasks": 3,
+  "task_timeout_s": 1800
+}

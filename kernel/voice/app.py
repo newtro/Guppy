@@ -22,7 +22,7 @@ from loguru import logger
 
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.audio.vad.vad_analyzer import VADParams
-from pipecat.frames.frames import LLMRunFrame
+from pipecat.frames.frames import TTSSpeakFrame
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.worker import PipelineParams, PipelineWorker
 from pipecat.processors.aggregators.llm_context import LLMContext
@@ -38,6 +38,8 @@ from pipecat.transports.smallwebrtc.request_handler import (
 from pipecat.transports.smallwebrtc.transport import SmallWebRTCTransport
 from pipecat.workers.runner import WorkerRunner
 
+from kernel.mind.tasks import TaskManager
+from kernel.voice.mind_bridge import TOOLS, MindBridge
 from kernel.voice.services import GuppyTTSService, MoodTagProcessor, ParakeetSTTService
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -87,7 +89,7 @@ async def run_bot(connection: SmallWebRTCConnection):
     tts = GuppyTTSService(voice_dir=BODY / "persona" / "voice")
     await asyncio.gather(stt.load(), tts.load())
 
-    context = LLMContext(messages=[{"role": "system", "content": persona()}])
+    context = LLMContext(messages=[{"role": "system", "content": persona()}], tools=TOOLS)
     user_agg, assistant_agg = LLMContextAggregatorPair(
         context, user_params=LLMUserAggregatorParams(
             # 0.4s of silence before Smart Turn judges the turn: a pause after "Guppy," shouldn't end it.
@@ -99,10 +101,15 @@ async def run_bot(connection: SmallWebRTCConnection):
     worker = PipelineWorker(pipeline, params=PipelineParams(
         audio_in_sample_rate=16000, audio_out_sample_rate=24000, enable_metrics=True))
 
+    bridge = MindBridge(tasks, llm, lambda: worker)
+    tasks.listeners.append(bridge.on_task)
+
     @worker.rtvi.event_handler("on_client_ready")
     async def on_client_ready(rtvi):
-        context.add_message({"role": "user", "content": "(The Admiral has just come online. Greet the Admiral in one short sentence.)"})
-        await worker.queue_frames([LLMRunFrame()])
+        greeting = "Aye, Admiral. Guppy online."
+        context.add_message({"role": "assistant", "content": f"[deadpan] {greeting}"})
+        await worker.queue_frames([TTSSpeakFrame(greeting)])
+        await bridge.on_connect()  # HUD state + any Mind reports that finished while offline
 
     runner = WorkerRunner(handle_sigint=False)
     await runner.add_workers(worker)
@@ -110,12 +117,14 @@ async def run_bot(connection: SmallWebRTCConnection):
     @transport.event_handler("on_client_disconnected")
     async def on_client_disconnected(transport, client):
         logger.info("Admiral disconnected")
+        tasks.listeners.remove(bridge.on_task)
         await runner.cancel()
 
     await runner.run()
 
 
 webrtc = SmallWebRTCRequestHandler()
+tasks = TaskManager()
 state: dict = {}
 
 
@@ -150,6 +159,27 @@ async def ice(request: SmallWebRTCPatchRequest):
 @app.get("/")
 async def index():
     return FileResponse(UI / "index.html", headers={"Cache-Control": "no-store"})
+
+
+@app.get("/api/tasks")
+async def list_tasks(limit: int = 20):
+    return tasks.list(limit=limit)
+
+
+@app.post("/api/tasks")
+async def create_task(body: dict):
+    return await tasks.submit(body["goal"], role=body.get("role", "general"), provenance="admiral",
+                              provider=body.get("provider"))
+
+
+@app.get("/api/tasks/{task_id}")
+async def get_task(task_id: int):
+    return {**(tasks.get(task_id) or {}), "events": tasks.events(task_id)}
+
+
+@app.post("/api/tasks/{task_id}/cancel")
+async def cancel_task(task_id: int):
+    return {"cancelled": await tasks.cancel(task_id)}
 
 
 @app.get("/test.wav")
