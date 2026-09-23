@@ -39,6 +39,7 @@
     "enroll_samples": 5,
     "margin": 0.15,
     "min_threshold": 0.45,
-    "max_threshold": 0.85
+    "max_threshold": 0.85,
+    "addressed_threshold": 0.55
   }
 }

@@ -96,3 +96,19 @@ class SpeakerVerifier:
     def forget(self):
         VOICEPRINT.unlink(missing_ok=True)
         self.print = None
+
+
+def addresses_guppy(text: str, aliases: set[str] = frozenset()) -> bool:
+    """Does the utterance start by addressing Guppy (fuzzy: Gopy, Guppie, ...; or a lone known mishearing)?"""
+    import difflib
+    import re
+    words = [re.sub(r"[^a-z]", "", w.lower()) for w in text.split()]
+    words = [w for w in words if w]
+    if words and words[0] in ("hey", "ok", "okay"):
+        words = words[1:]
+    if not words:
+        return False
+    w = words[0]
+    if len(words) <= 2 and w in aliases:
+        return True
+    return 4 <= len(w) <= 7 and w[0] in "gkc" and difflib.SequenceMatcher(None, w, "guppy").ratio() >= 0.6

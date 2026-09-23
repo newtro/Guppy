@@ -41,8 +41,21 @@ class ParakeetSTTService(SegmentedSTTService):
         self._model_id = model
         self._model = None
         self.verifier = verifier            # kernel.voice.speaker.SpeakerVerifier, shared
+        self.wake_aliases: list[str] = []   # lone mishearings of "Guppy" (voice.json wake.bare_aliases)
         self._enroll: list | None = None    # embeddings being collected while enrolling
         self._enroll_target = 0
+
+    def _addressed_ok(self, text: str, score: float) -> bool:
+        """Speech that starts with 'Guppy, ...' is itself evidence it's for Guppy: accept it at a lower match."""
+        from kernel.voice.speaker import addresses_guppy
+        import time as _t
+        cfg = self.verifier.cfg
+        if score < cfg.get("addressed_threshold", 1.0):
+            return False
+        if addresses_guppy(text or "", set(self.wake_aliases or ())):
+            self._relaxed_until = _t.time() + 10  # the follow-up to a bare "Guppy" gets the same allowance
+            return True
+        return _t.time() < getattr(self, "_relaxed_until", 0)
 
     def start_enrollment(self, samples: int):
         self._enroll, self._enroll_target = [], samples
@@ -98,6 +111,9 @@ class ParakeetSTTService(SegmentedSTTService):
             text = await on_mlx(self._transcribe, audio, self.sample_rate)
             if verify is not None:
                 ok, score = await verify
+                if not ok and self._addressed_ok(text, score):
+                    ok = True
+                    logger.info(f"Accepted at the addressed threshold (match {score:.2f}): {text!r}")
                 if not ok:
                     logger.info(f"Ignored another voice (match {score:.2f} < {self.verifier.threshold:.2f}): {text!r}")
                     return

@@ -157,6 +157,7 @@ async def run_bot(connection: SmallWebRTCConnection):
         params=TransportParams(audio_in_enabled=True, audio_out_enabled=True),
     )
     stt = ParakeetSTTService(verifier=verifier)
+    stt.wake_aliases = voice_spec().get("wake", {}).get("bare_aliases", [])
     llm = OpenAILLMService(base_url=LLM_URL, api_key="local", model=LLM_MODEL)
     tts = GuppyTTSService(voice_dir=BODY / "persona" / "voice")
     await asyncio.gather(stt.load(), tts.load())
