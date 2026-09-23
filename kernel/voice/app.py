@@ -9,6 +9,7 @@ Barge-in: speaking over Guppy interrupts TTS (VAD user-start interrupts the bot)
 import asyncio
 import json
 import os
+import re
 import subprocess
 import sys
 from contextlib import asynccontextmanager
@@ -23,7 +24,7 @@ from loguru import logger
 
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.audio.vad.vad_analyzer import VADParams
-from pipecat.frames.frames import TTSSpeakFrame
+from pipecat.frames.frames import BotStoppedSpeakingFrame, TranscriptionFrame, TTSSpeakFrame
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.worker import PipelineParams, PipelineWorker
 from pipecat.processors.aggregators.llm_context import LLMContext
@@ -34,6 +35,7 @@ from pipecat.transports.base_transport import TransportParams
 from pipecat.turns.user_start.transcription_user_turn_start_strategy import TranscriptionUserTurnStartStrategy
 from pipecat.turns.user_start.vad_user_turn_start_strategy import VADUserTurnStartStrategy
 from pipecat.turns.user_start.wake_phrase_user_turn_start_strategy import WakePhraseUserTurnStartStrategy
+from pipecat.turns.types import ProcessFrameResult
 from pipecat.turns.user_turn_strategies import UserTurnStrategies
 from pipecat.transports.smallwebrtc.connection import SmallWebRTCConnection
 from pipecat.transports.smallwebrtc.request_handler import (
@@ -49,6 +51,7 @@ from kernel.scheduler import Scheduler
 from kernel.mind.tasks import TaskManager
 from kernel.selfmod import SelfMod
 from kernel.voice.mind_bridge import TOOLS, MindBridge
+from kernel.voice.guards import ContextTrimmer, PromiseKeeper
 from kernel.voice.services import GuppyTTSService, MoodTagProcessor, ParakeetSTTService
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -60,10 +63,34 @@ LLM_URL = f"http://127.0.0.1:{LLM_PORT}/v1"
 
 
 class WakeGate(WakePhraseUserTurnStartStrategy):
-    """Pipecat's wake-phrase gate, plus a manual wake (clicking Guppy's head)."""
+    """Pipecat's wake-phrase gate, plus a manual wake (clicking Guppy's head) and, in every-turn mode, back to
+    sleep as soon as Guppy has finished answering, so a TV talking right after can't slip into the awake window.
+    A bare "Guppy" (nothing else said) keeps him awake for the actual request."""
+
+    def __init__(self, *args, every_turn: bool = False, bare_aliases: list[str] = (), **kwargs):
+        super().__init__(*args, single_activation=every_turn, **kwargs)
+        self._every_turn, self._bare_wake = every_turn, False
+        self._bare_aliases = set(bare_aliases)  # how the STT mishears a lone "Guppy"; only count when said alone
 
     def force_awake(self, reason: str = "click"):
+        self._bare_wake = True  # a click is like saying just "Guppy"
         self._transition_to_awake(reason)
+
+    async def process_frame(self, frame):
+        if isinstance(frame, TranscriptionFrame) and not self.awake:
+            words = re.sub(r"[^\w\s]", "", frame.text.lower()).split()
+            if 1 <= len(words) <= 2 and set(words) - {"hey", "ok", "okay"} <= self._bare_aliases and words[-1] in self._bare_aliases:
+                logger.info(f"Bare wake from likely mishearing {frame.text!r}")
+                self.force_awake("bare")
+                await self._call_event_handler("on_wake_phrase_detected", "guppy")
+                return ProcessFrameResult.STOP
+        if isinstance(frame, TranscriptionFrame) and self._every_turn:
+            words = re.sub(r"[^\w\s]", "", frame.text.lower()).split()
+            rest = [w for w in words if not any(re.fullmatch(p, w) for p in self._phrases) and w not in ("hey", "ok", "okay")]
+            self._bare_wake = not rest
+        if (self._every_turn and isinstance(frame, BotStoppedSpeakingFrame) and self.awake and not self._bare_wake):
+            self._transition_to_idle()
+        return await super().process_frame(frame)
 
     @property
     def awake(self) -> bool:
@@ -119,7 +146,8 @@ async def run_bot(connection: SmallWebRTCConnection):
     start = [VADUserTurnStartStrategy(), TranscriptionUserTurnStartStrategy()]
     if wake_cfg.get("enabled"):
         # Asleep: speech without the wake word is dropped and can't start a turn or interrupt Guppy.
-        wake = WakeGate(phrases=wake_cfg.get("phrases", ["guppy"]), timeout=wake_cfg.get("awake_timeout_s", 30))
+        wake = WakeGate(phrases=wake_cfg.get("phrases", ["guppy"]), timeout=wake_cfg.get("awake_timeout_s", 30),
+                        every_turn=bool(wake_cfg.get("every_turn")), bare_aliases=wake_cfg.get("bare_aliases", []))
         start = [wake, *start]
     user_agg, assistant_agg = LLMContextAggregatorPair(
         context, user_params=LLMUserAggregatorParams(
@@ -128,7 +156,8 @@ async def run_bot(connection: SmallWebRTCConnection):
             user_turn_strategies=UserTurnStrategies(start=start)))
 
     pipeline = Pipeline([
-        transport.input(), stt, user_agg, llm, MoodTagProcessor(), tts, transport.output(), assistant_agg,
+        transport.input(), stt, user_agg, ContextTrimmer(), llm, PromiseKeeper(context, tasks), MoodTagProcessor(),
+        tts, transport.output(), assistant_agg,
     ])
     worker = PipelineWorker(pipeline, params=PipelineParams(
         audio_in_sample_rate=16000, audio_out_sample_rate=24000, enable_metrics=True))

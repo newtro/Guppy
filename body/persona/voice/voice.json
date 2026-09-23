@@ -22,6 +22,16 @@
       "guppi",
       "gupi"
     ],
-    "awake_timeout_s": 30
+    "awake_timeout_s": 12,
+    "every_turn": true,
+    "bare_aliases": [
+      "copy",
+      "coffee",
+      "puppy",
+      "gappy",
+      "guppies",
+      "cuppy",
+      "gubby"
+    ]
   }
 }

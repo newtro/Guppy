@@ -20,6 +20,13 @@ from kernel.selfmod import SelfMod
 
 TOOLS = ToolsSchema(standard_tools=[
     FunctionSchema(
+        name="local_time",
+        description="The current date and time, instantly, locally or in any IANA timezone. Use this for any "
+                    "time or date question instead of the Mind.",
+        properties={"timezone": {"type": "string", "description": "IANA zone like Asia/Tokyo or Europe/London; omit for the Admiral's local time."}},
+        required=[],
+    ),
+    FunctionSchema(
         name="delegate_to_mind",
         description="Hand a task to the Mind, Guppy's capable background agent with shell, files, web and code tools. "
                     "Use for anything needing tools, current information, or real work.",
@@ -100,6 +107,9 @@ TOOLS = ToolsSchema(standard_tools=[
 ])
 
 
+REPORT_MAX_AGE_S = 2 * 3600  # reports that finished while offline are spoken on reconnect only if this recent
+
+
 def hud(task: dict) -> dict:
     return {k: task.get(k) for k in ("id", "goal", "role", "provider", "status", "summary", "error", "tool")}
 
@@ -121,6 +131,7 @@ class MindBridge:
         llm.register_function("schedule_task", self._schedule)
         llm.register_function("list_schedules", self._list_schedules)
         llm.register_function("cancel_schedule", self._cancel_schedule)
+        llm.register_function("local_time", self._local_time)
         llm.register_function("confirm_action", self._confirm)
         llm.register_function("cancel_action", self._cancel_action)
         llm.register_function("improve_self", self._improve)
@@ -192,6 +203,16 @@ class MindBridge:
     async def _cancel_schedule(self, params: FunctionCallParams):
         await params.result_callback({"cancelled": self.scheduler.cancel(int(params.arguments.get("schedule_id", 0)))})
 
+    async def _local_time(self, params: FunctionCallParams):
+        from datetime import datetime
+        from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+        tz = (params.arguments.get("timezone") or "").strip()
+        try:
+            now = datetime.now(ZoneInfo(tz)) if tz else datetime.now().astimezone()
+        except (ZoneInfoNotFoundError, ValueError):
+            return await params.result_callback({"error": f"unknown timezone {tz!r}; use an IANA name like Asia/Tokyo"})
+        await params.result_callback({"timezone": tz or "local", "time": now.strftime("%A %B %-d, %-I:%M %p %Z")})
+
     def _pending(self, params: FunctionCallParams) -> dict | None:
         aid = params.arguments.get("action_id")
         return self.gate.get(int(aid)) if aid else self.gate.latest_pending()
@@ -239,5 +260,9 @@ class MindBridge:
         w = self.worker
         for t in self.tasks.list(limit=10, active_only=True):
             await w.queue_frames([RTVIServerMessageFrame(data={"type": "task", "event": t["status"], "task": hud(t)})])
+        import time
         for t in [t for t in self.tasks.unreported() if t.get("role") != "selfmod"]:
+            if (t.get("finished") or 0) < time.time() - REPORT_MAX_AGE_S:  # stale news: don't replay it aloud
+                self.tasks.mark_reported(t["id"])
+                continue
             await self.report(t)
