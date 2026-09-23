@@ -22,3 +22,4 @@ tripo-out/
 .claude/launch.json
 .DS_Store
 .run/
+pet/build/
