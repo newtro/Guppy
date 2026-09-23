@@ -5,6 +5,8 @@
 - When a task finishes, injects a "[Mind report]" into the conversation so Guppy says it out loud.
   Reports that finish while nobody is connected are delivered on the next connection.
 """
+import re
+
 from loguru import logger
 
 from pipecat.adapters.schemas.function_schema import FunctionSchema
@@ -27,8 +29,9 @@ TOOLS = ToolsSchema(standard_tools=[
     ),
     FunctionSchema(
         name="forget_voice",
-        description="Delete the Admiral's stored voiceprint (Guppy then listens to any voice again).",
-        properties={}, required=[],
+        description="Delete the Admiral's stored voiceprint. ONLY when the Admiral explicitly says to forget his voice.",
+        properties={"admiral_said": {"type": "string", "description": "The Admiral's exact words asking for this."}},
+        required=["admiral_said"],
     ),
     FunctionSchema(
         name="local_time",
@@ -62,8 +65,9 @@ TOOLS = ToolsSchema(standard_tools=[
     ),
     FunctionSchema(
         name="undo_last_change",
-        description="Revert the most recent self-modification that went live.",
-        properties={}, required=[],
+        description="Revert the most recent self-modification that went live. ONLY when the Admiral explicitly asks to undo it.",
+        properties={"admiral_said": {"type": "string", "description": "The Admiral's exact words asking for this."}},
+        required=["admiral_said"],
     ),
     FunctionSchema(
         name="list_changes",
@@ -181,6 +185,8 @@ class MindBridge:
         await params.result_callback({"change_id": change["id"], "status": change["status"]})
 
     async def _undo(self, params: FunctionCallParams):
+        if not re.search(r"\b(undo|roll ?back|revert)\b", params.arguments.get("admiral_said", ""), re.I):
+            return await params.result_callback({"refused": "the Admiral did not ask to undo anything"})
         change = await self.selfmod.undo_last()
         await params.result_callback({"reverted": change["id"] if change else None,
                                       "status": change["status"] if change else "nothing to undo"})
@@ -226,6 +232,9 @@ class MindBridge:
             f"Say {n} sentences, anything at all, one at a time, pausing after each. I'll say 'got it' after each one."})
 
     async def _forget_voice(self, params: FunctionCallParams):
+        said = params.arguments.get("admiral_said", "")
+        if not (re.search(r"\bforget\b", said, re.I) and re.search(r"\bvoice", said, re.I)):
+            return await params.result_callback({"refused": "the Admiral did not ask to forget his voice"})
         if self.verifier:
             self.verifier.forget()
         await params.result_callback({"forgotten": True})
