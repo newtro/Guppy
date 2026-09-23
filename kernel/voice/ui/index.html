@@ -232,7 +232,10 @@ window.guppyPet = {
     bubble("Listening.");
   },
   isMuted: () => muted,
-  reconnect() { if (!pc) connect().catch(() => {}); },
+  reconnect() {  // keep trying until the kernel is back (it takes ~40 s to load its models after a restart)
+    if (pc) return;
+    connect().catch(() => { hangup(); });
+  },
 };
 
 window.guppy = { get cur() { return cur; }, events: [], t };
