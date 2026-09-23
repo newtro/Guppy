@@ -1,0 +1,14 @@
+{
+  "name": "blog",
+  "description": "The Admiral's self-hosted blog at johnnycode.ai/blog: read posts, generate a hero image, save a draft, publish, and unpublish.",
+  "effects": {
+    "list_posts": "read",
+    "get_post": "read",
+    "generate_image": "draft",
+    "save_draft": "draft",
+    "publish_post": "act",
+    "unpublish_post": "act"
+  },
+  "taints": [],
+  "enabled": true
+}

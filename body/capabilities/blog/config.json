@@ -1,0 +1,11 @@
+{
+  "base_url": "https://johnnycode.ai",
+  "image": {
+    "working_dir": "~/Library/Application Support/Guppy/blog-images",
+    "width": 1600,
+    "height": 900,
+    "quality": 82,
+    "max_bytes": 8388608,
+    "style": "Editorial hero illustration for a technology essay. Black background, electric blue #35bdff and circuit orange #ff9a45 accents, clean geometric composition, cinematic depth, no text, no lettering, no logos, no watermarks."
+  }
+}
