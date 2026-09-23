@@ -20,6 +20,17 @@ from kernel.selfmod import SelfMod
 
 TOOLS = ToolsSchema(standard_tools=[
     FunctionSchema(
+        name="enroll_voice",
+        description="Learn the Admiral's voice so Guppy ignores everyone else (TV, other people). Starts a short "
+                    "enrollment: the Admiral says a few sentences, one at a time.",
+        properties={}, required=[],
+    ),
+    FunctionSchema(
+        name="forget_voice",
+        description="Delete the Admiral's stored voiceprint (Guppy then listens to any voice again).",
+        properties={}, required=[],
+    ),
+    FunctionSchema(
         name="local_time",
         description="The current date and time, instantly, locally or in any IANA timezone. Use this for any "
                     "time or date question instead of the Mind.",
@@ -125,9 +136,12 @@ def report_message(task: dict) -> dict:
 class MindBridge:
     """One per voice session."""
 
-    def __init__(self, tasks: TaskManager, selfmod: SelfMod, gate: Gate, scheduler: Scheduler, llm, worker_ref):
+    def __init__(self, tasks: TaskManager, selfmod: SelfMod, gate: Gate, scheduler: Scheduler, llm, worker_ref,
+                 stt=None, verifier=None):
         self.tasks, self.selfmod, self.gate, self.llm, self.worker_ref = tasks, selfmod, gate, llm, worker_ref
-        self.scheduler = scheduler
+        self.scheduler, self.stt, self.verifier = scheduler, stt, verifier
+        llm.register_function("enroll_voice", self._enroll_voice)
+        llm.register_function("forget_voice", self._forget_voice)
         llm.register_function("schedule_task", self._schedule)
         llm.register_function("list_schedules", self._list_schedules)
         llm.register_function("cancel_schedule", self._cancel_schedule)
@@ -202,6 +216,19 @@ class MindBridge:
 
     async def _cancel_schedule(self, params: FunctionCallParams):
         await params.result_callback({"cancelled": self.scheduler.cancel(int(params.arguments.get("schedule_id", 0)))})
+
+    async def _enroll_voice(self, params: FunctionCallParams):
+        n = int(self.verifier.cfg.get("enroll_samples", 5)) if self.verifier else 0
+        if not (self.stt and self.verifier and self.verifier.enabled):
+            return await params.result_callback({"error": "speaker verification is disabled"})
+        self.stt.start_enrollment(n)
+        await params.result_callback({"started": True, "samples": n, "tell_the_admiral":
+            f"Say {n} sentences, anything at all, one at a time, pausing after each. I'll say 'got it' after each one."})
+
+    async def _forget_voice(self, params: FunctionCallParams):
+        if self.verifier:
+            self.verifier.forget()
+        await params.result_callback({"forgotten": True})
 
     async def _local_time(self, params: FunctionCallParams):
         from datetime import datetime

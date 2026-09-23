@@ -16,7 +16,7 @@ import numpy as np
 from loguru import logger
 
 from pipecat.audio.utils import create_stream_resampler
-from pipecat.frames.frames import ErrorFrame, Frame, LLMTextFrame, TranscriptionFrame, TTSAudioRawFrame
+from pipecat.frames.frames import ErrorFrame, Frame, LLMTextFrame, TranscriptionFrame, TTSAudioRawFrame, TTSSpeakFrame
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.processors.frameworks.rtvi import RTVIServerMessageFrame
 from pipecat.services.settings import STTSettings, TTSSettings
@@ -36,10 +36,28 @@ async def on_mlx(fn, *args):
 class ParakeetSTTService(SegmentedSTTService):
     """Transcribes each VAD-bounded utterance with NVIDIA Parakeet TDT (MLX)."""
 
-    def __init__(self, *, model: str = "mlx-community/parakeet-tdt-0.6b-v3", **kwargs):
+    def __init__(self, *, model: str = "mlx-community/parakeet-tdt-0.6b-v3", verifier=None, **kwargs):
         super().__init__(settings=STTSettings(model=model, language=Language.EN), **kwargs)
         self._model_id = model
         self._model = None
+        self.verifier = verifier            # kernel.voice.speaker.SpeakerVerifier, shared
+        self._enroll: list | None = None    # embeddings being collected while enrolling
+        self._enroll_target = 0
+
+    def start_enrollment(self, samples: int):
+        self._enroll, self._enroll_target = [], samples
+
+    async def _enroll_step(self, audio: bytes) -> str:
+        from kernel.voice.speaker import MIN_ENROLL_SECONDS
+        if len(audio) / 2 / self.sample_rate < MIN_ENROLL_SECONDS:
+            return "A bit longer, please."
+        self._enroll.append(await asyncio.to_thread(self.verifier.embed, audio, self.sample_rate))
+        left = self._enroll_target - len(self._enroll)
+        if left > 0:
+            return "Got it."
+        samples, self._enroll = self._enroll, None
+        await asyncio.to_thread(self.verifier.save_enrollment, samples)
+        return "Voice learned, Admiral. From now on I only listen to you."
 
     @property
     def wants_wav_segments(self) -> bool:
@@ -71,9 +89,20 @@ class ParakeetSTTService(SegmentedSTTService):
         try:
             if self._model is None:
                 await self.load()
+            if self._enroll is not None:  # enrollment: this utterance is a voice sample, not a request
+                yield TTSSpeakFrame(await self._enroll_step(audio))
+                return
             import time
             t0 = time.perf_counter()
+            verify = asyncio.to_thread(self.verifier.is_admiral, audio, self.sample_rate) if self.verifier else None
             text = await on_mlx(self._transcribe, audio, self.sample_rate)
+            if verify is not None:
+                ok, score = await verify
+                if not ok:
+                    logger.info(f"Ignored another voice (match {score:.2f} < {self.verifier.threshold:.2f}): {text!r}")
+                    return
+                if self.verifier.enrolled:
+                    logger.debug(f"Admiral's voice (match {score:.2f})")
             logger.debug(f"STT {len(audio) / 2 / self.sample_rate:.1f}s audio in {time.perf_counter() - t0:.3f}s")
             if text:
                 logger.info(f"Admiral: {text}")

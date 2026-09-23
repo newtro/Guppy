@@ -1,11 +1,41 @@
 {
   "_about": "Spoken the moment Guppy decides to use a tool, so there is no dead air. One is picked at random.",
-  "local_time": ["Checking the chronometer.", "One moment, Admiral.", "Consulting the clock."],
-  "delegate_to_mind": ["Aye. Handing that to the Mind.", "On it, Admiral.", "Sending that below decks."],
-  "improve_self": ["Aye. Scheduling some self-improvement.", "Understood. I'll see about that."],
-  "schedule_task": ["Noting it down.", "One moment."],
-  "mind_status": ["Checking on the Mind.", "Let me look."],
-  "list_schedules": ["Let me look."],
-  "list_changes": ["Checking my records."],
-  "default": ["One moment, Admiral.", "Let me check."]
+  "local_time": [
+    "Checking the chronometer.",
+    "One moment, Admiral.",
+    "Consulting the clock."
+  ],
+  "delegate_to_mind": [
+    "Aye. Handing that to the Mind.",
+    "On it, Admiral.",
+    "Sending that below decks."
+  ],
+  "improve_self": [
+    "Aye. Scheduling some self-improvement.",
+    "Understood. I'll see about that."
+  ],
+  "schedule_task": [
+    "Noting it down.",
+    "One moment."
+  ],
+  "mind_status": [
+    "Checking on the Mind.",
+    "Let me look."
+  ],
+  "list_schedules": [
+    "Let me look."
+  ],
+  "list_changes": [
+    "Checking my records."
+  ],
+  "default": [
+    "One moment, Admiral.",
+    "Let me check."
+  ],
+  "enroll_voice": [
+    "Right. Voice lessons."
+  ],
+  "forget_voice": [
+    "Forgetting."
+  ]
 }

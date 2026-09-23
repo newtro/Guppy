@@ -51,6 +51,7 @@ from kernel.scheduler import Scheduler
 from kernel.mind.tasks import TaskManager
 from kernel.selfmod import SelfMod
 from kernel.voice.mind_bridge import TOOLS, MindBridge
+from kernel.voice.speaker import SpeakerVerifier
 from kernel.voice.guards import ContextTrimmer, PromiseKeeper, ToolFiller
 from kernel.voice.services import GuppyTTSService, MoodTagProcessor, ParakeetSTTService
 
@@ -135,7 +136,7 @@ async def run_bot(connection: SmallWebRTCConnection):
         webrtc_connection=connection,
         params=TransportParams(audio_in_enabled=True, audio_out_enabled=True),
     )
-    stt = ParakeetSTTService()
+    stt = ParakeetSTTService(verifier=verifier)
     llm = OpenAILLMService(base_url=LLM_URL, api_key="local", model=LLM_MODEL)
     tts = GuppyTTSService(voice_dir=BODY / "persona" / "voice")
     await asyncio.gather(stt.load(), tts.load())
@@ -143,7 +144,10 @@ async def run_bot(connection: SmallWebRTCConnection):
     context = LLMContext(messages=[{"role": "system", "content": persona()}], tools=TOOLS)
     wake_cfg = voice_spec().get("wake", {})
     wake = None
-    start = [VADUserTurnStartStrategy(), TranscriptionUserTurnStartStrategy()]
+    # With speaker verification, turns (and interruptions) start only from verified transcripts: raw voice
+    # activity from a TV must not cut Guppy off. Costs a little barge-in latency.
+    start = ([TranscriptionUserTurnStartStrategy()] if verifier.enabled
+             else [VADUserTurnStartStrategy(), TranscriptionUserTurnStartStrategy()])
     if wake_cfg.get("enabled"):
         # Asleep: speech without the wake word is dropped and can't start a turn or interrupt Guppy.
         wake = WakeGate(phrases=wake_cfg.get("phrases", ["guppy"]), timeout=wake_cfg.get("awake_timeout_s", 30),
@@ -163,7 +167,7 @@ async def run_bot(connection: SmallWebRTCConnection):
     worker = PipelineWorker(pipeline, params=PipelineParams(
         audio_in_sample_rate=16000, audio_out_sample_rate=24000, enable_metrics=True))
 
-    bridge = MindBridge(tasks, selfmod, gate, scheduler, llm, lambda: worker)
+    bridge = MindBridge(tasks, selfmod, gate, scheduler, llm, lambda: worker, stt=stt, verifier=verifier)
     tasks.listeners.append(bridge.on_task)
     selfmod.listeners.append(bridge.on_change)
     gate.listeners.append(bridge.on_action)
@@ -228,6 +232,7 @@ async def watch_reflex_llm():
 
 webrtc = SmallWebRTCRequestHandler()
 tasks = TaskManager()
+verifier = SpeakerVerifier(json.loads((BODY / "persona" / "voice" / "voice.json").read_text()).get("speaker_verification", {}))
 selfmod = SelfMod(tasks)
 gate = Gate(tasks, lambda: tasks.config)
 scheduler = Scheduler(tasks)
@@ -237,6 +242,9 @@ state: dict = {}
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     state["llm_proc"] = await ensure_reflex_llm()
+    if verifier.enabled:
+        await asyncio.to_thread(verifier._model)  # load (and download once) the speaker model
+        logger.info(f"Speaker verification on; {'enrolled, threshold %.2f' % verifier.threshold if verifier.enrolled else 'not enrolled yet'}")
     # Preload STT + TTS so the first connection is instant.
     await asyncio.gather(ParakeetSTTService().load(), GuppyTTSService(voice_dir=BODY / "persona" / "voice").load())
     scheduler.start()

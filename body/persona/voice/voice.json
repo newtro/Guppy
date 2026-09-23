@@ -33,5 +33,12 @@
       "cuppy",
       "gubby"
     ]
+  },
+  "speaker_verification": {
+    "enabled": true,
+    "enroll_samples": 5,
+    "margin": 0.15,
+    "min_threshold": 0.45,
+    "max_threshold": 0.85
   }
 }
