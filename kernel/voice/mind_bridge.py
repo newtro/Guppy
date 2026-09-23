@@ -15,6 +15,7 @@ from pipecat.services.llm_service import FunctionCallParams
 
 from kernel.gate import Gate, describe
 from kernel.mind.tasks import TaskManager
+from kernel.scheduler import Scheduler, describe as describe_schedule
 from kernel.selfmod import SelfMod
 
 TOOLS = ToolsSchema(standard_tools=[
@@ -65,6 +66,32 @@ TOOLS = ToolsSchema(standard_tools=[
         required=[],
     ),
     FunctionSchema(
+        name="schedule_task",
+        description="Schedule a Mind task to run later or on a repeating schedule (reminders, digests, recurring checks). "
+                    "When it runs, the result is reported to the Admiral like any Mind task.",
+        properties={
+            "goal": {"type": "string", "description": "What the Mind should do each time, complete and self-contained. "
+                                                      "For a reminder, e.g. 'Remind the Admiral to call the dentist.'"},
+            "when": {"type": "string", "description": "RECURRING: 'every monday at 8:00', 'every weekday at 9am', "
+                     "'every day at 17:30', 'every mon and thu at 7:15 pm', 'every month on the 1st at 9:00', 'every 30m', 'every 6h'. "
+                     "ONE-TIME: 'in 20m', 'in 2h', 'once at 14:30'. Use a recurring form whenever the Admiral says "
+                     "every/each/daily/weekly. Advanced: a 5-field cron like '0 9 1 * *' (9:00 on the 1st of each month)."},
+            "role": {"type": "string", "enum": ["general", "coding", "research", "review"]},
+        },
+        required=["goal", "when"],
+    ),
+    FunctionSchema(
+        name="list_schedules",
+        description="List the Admiral's active schedules with their next run time.",
+        properties={}, required=[],
+    ),
+    FunctionSchema(
+        name="cancel_schedule",
+        description="Stop a schedule.",
+        properties={"schedule_id": {"type": "integer"}},
+        required=["schedule_id"],
+    ),
+    FunctionSchema(
         name="cancel_mind_task",
         description="Stop a running Mind task.",
         properties={"task_id": {"type": "integer", "description": "The task number."}},
@@ -88,8 +115,12 @@ def report_message(task: dict) -> dict:
 class MindBridge:
     """One per voice session."""
 
-    def __init__(self, tasks: TaskManager, selfmod: SelfMod, gate: Gate, llm, worker_ref):
+    def __init__(self, tasks: TaskManager, selfmod: SelfMod, gate: Gate, scheduler: Scheduler, llm, worker_ref):
         self.tasks, self.selfmod, self.gate, self.llm, self.worker_ref = tasks, selfmod, gate, llm, worker_ref
+        self.scheduler = scheduler
+        llm.register_function("schedule_task", self._schedule)
+        llm.register_function("list_schedules", self._list_schedules)
+        llm.register_function("cancel_schedule", self._cancel_schedule)
         llm.register_function("confirm_action", self._confirm)
         llm.register_function("cancel_action", self._cancel_action)
         llm.register_function("improve_self", self._improve)
@@ -146,6 +177,20 @@ class MindBridge:
                        "reverted": "was rolled back", "revert_failed": "needs the Admiral: automatic rollback failed"}[event]
             msg = f"[Mind report] Self-modification {change['id']} ({change['goal'][:100]}) {verdict}. {change.get('reason') or ''}"
             await w.queue_frames([LLMMessagesAppendFrame(messages=[{"role": "user", "content": msg[:700]}], run_llm=True)])
+
+    async def _schedule(self, params: FunctionCallParams):
+        try:
+            sc = self.scheduler.create(params.arguments["goal"], params.arguments["when"],
+                                       role=params.arguments.get("role") or "general")
+            await params.result_callback({"schedule": describe_schedule(sc)})
+        except (ValueError, KeyError) as e:  # let the LLM fix the format and try again
+            await params.result_callback({"error": f"could not schedule: {e}"})
+
+    async def _list_schedules(self, params: FunctionCallParams):
+        await params.result_callback({"schedules": [describe_schedule(sc) for sc in self.scheduler.list()]})
+
+    async def _cancel_schedule(self, params: FunctionCallParams):
+        await params.result_callback({"cancelled": self.scheduler.cancel(int(params.arguments.get("schedule_id", 0)))})
 
     def _pending(self, params: FunctionCallParams) -> dict | None:
         aid = params.arguments.get("action_id")

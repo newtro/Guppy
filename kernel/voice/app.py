@@ -39,6 +39,7 @@ from pipecat.transports.smallwebrtc.transport import SmallWebRTCTransport
 from pipecat.workers.runner import WorkerRunner
 
 from kernel.gate import Gate
+from kernel.scheduler import Scheduler
 from kernel.mind.tasks import TaskManager
 from kernel.selfmod import SelfMod
 from kernel.voice.mind_bridge import TOOLS, MindBridge
@@ -103,7 +104,7 @@ async def run_bot(connection: SmallWebRTCConnection):
     worker = PipelineWorker(pipeline, params=PipelineParams(
         audio_in_sample_rate=16000, audio_out_sample_rate=24000, enable_metrics=True))
 
-    bridge = MindBridge(tasks, selfmod, gate, llm, lambda: worker)
+    bridge = MindBridge(tasks, selfmod, gate, scheduler, llm, lambda: worker)
     tasks.listeners.append(bridge.on_task)
     selfmod.listeners.append(bridge.on_change)
     gate.listeners.append(bridge.on_action)
@@ -133,6 +134,7 @@ webrtc = SmallWebRTCRequestHandler()
 tasks = TaskManager()
 selfmod = SelfMod(tasks)
 gate = Gate(tasks, lambda: tasks.config)
+scheduler = Scheduler(tasks)
 state: dict = {}
 
 
@@ -141,6 +143,7 @@ async def lifespan(app: FastAPI):
     state["llm_proc"] = await ensure_reflex_llm()
     # Preload STT + TTS so the first connection is instant.
     await asyncio.gather(ParakeetSTTService().load(), GuppyTTSService(voice_dir=BODY / "persona" / "voice").load())
+    scheduler.start()
     logger.info("Guppy is listening: http://127.0.0.1:8765")
     yield
     await webrtc.close()
@@ -209,6 +212,24 @@ async def gate_taint(body: dict):
 async def gate_actions(limit: int = 20):
     return gate.list(limit=limit)
 # Deliberately no HTTP endpoint to confirm or cancel actions: only the Admiral's voice can.
+
+
+@app.get("/api/schedules")
+async def list_schedules(all: bool = False):
+    return scheduler.list(include_disabled=all)
+
+
+@app.post("/api/schedules")
+async def create_schedule(body: dict):
+    try:
+        return scheduler.create(body["goal"], body["when"], role=body.get("role", "general"))
+    except ValueError as e:
+        return {"error": str(e)}
+
+
+@app.delete("/api/schedules/{sid}")
+async def delete_schedule(sid: int):
+    return {"cancelled": scheduler.cancel(sid)}
 
 
 @app.get("/api/changes")
