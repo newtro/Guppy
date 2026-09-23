@@ -1,7 +1,7 @@
 // GuppyPet: Guppy's head, floating on the desktop.
 //
 // A borderless, transparent, always-on-top panel (every Space, over full-screen apps) hosting the kernel's UI in
-// pet mode (http://127.0.0.1:8765/?pet). Drag the head to move it; click to mute/unmute; right-click for the menu.
+// pet mode (http://127.0.0.1:8765/?pet). Say "Guppy" or click the head to wake him; drag to move; right-click for the menu.
 // No Dock icon. The panel remembers where you left it. If the kernel isn't up yet, it keeps retrying.
 import AppKit
 import WebKit
@@ -28,7 +28,7 @@ final class HandleView: NSView {
         w.setFrameOrigin(NSPoint(x: w.frame.origin.x + e.deltaX, y: w.frame.origin.y - e.deltaY))
     }
     override func mouseUp(with e: NSEvent) {
-        if dragged { app?.savePosition() } else { app?.toggleMute() }
+        if dragged { app?.savePosition() } else { app?.wake() }
     }
     override func rightMouseDown(with e: NSEvent) {
         guard let menu = app?.menu() else { return }
@@ -99,6 +99,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
 
     // ---- actions ----
     func toggleMute() { web.evaluateJavaScript("window.guppyPet && window.guppyPet.toggleMute()") }
+    func wake() { web.evaluateJavaScript("window.guppyPet && window.guppyPet.wake()") }
     func savePosition() { defaults.set(NSStringFromPoint(panel.frame.origin), forKey: "origin") }
     func setSize(_ side: CGFloat) {
         var f = panel.frame

@@ -41,6 +41,9 @@ if [ "${1:-}" = "--login" ]; then
 </dict></plist>
 PLIST
   launchctl bootout "gui/$(id -u)/ai.guppy.pet" 2>/dev/null || true
-  launchctl bootstrap "gui/$(id -u)" "$PLIST"
+  for _ in 1 2 3 4 5; do  # bootout finishes asynchronously; retry until launchd accepts the new job
+    launchctl bootstrap "gui/$(id -u)" "$PLIST" 2>/dev/null && break
+    sleep 1
+  done
   echo "GuppyPet starts at login (quit from its menu to stop until next login)."
 fi

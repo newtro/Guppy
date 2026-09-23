@@ -34,6 +34,7 @@
   body.pet #ring.thinking { background: #ff9a45; opacity: .9; box-shadow: 0 0 10px #ff9a45; animation: pulse 1s ease-in-out infinite; }
   body.pet #ring.speaking { background: #ff9a45; opacity: 1; box-shadow: 0 0 14px #ff9a45; }
   body.pet #ring.muted { background: #d9534f; opacity: .8; }
+  body.pet #ring.asleep { background: #35bdff; opacity: .22; box-shadow: none; }
   body.pet #ring.offline { background: #555; opacity: .6; }
   @keyframes pulse { 50% { opacity: .35; } }
   #bubble { display: none; }
@@ -69,16 +70,14 @@ const setState = (s) => $("state").textContent = s;
 const TEST = new URLSearchParams(location.search).has("test");  // feed a WAV as the "mic" (for automated checks)
 const PET = new URLSearchParams(location.search).has("pet");    // floating-head mode for the GuppyPet app
 if (PET) { document.body.classList.add("pet"); document.documentElement.style.background = "transparent"; }
-let muted = PET;  // pet mode is click-to-talk: starts muted
-const LISTEN_WINDOW_MS = 30000;  // re-mute after this long without conversation
-let idleTimer = null;
-function armIdle() {  // (re)start the auto-mute countdown while the mic is open
-  clearTimeout(idleTimer);
-  if (PET && !muted) idleTimer = setTimeout(() => { if (!muted) window.guppyPet.toggleMute(); }, LISTEN_WINDOW_MS);
-}
+let muted = false;
+let awake = true, wakeEnabled = false;  // server tells us (wake word gate)
 function petState(s) {  // ring + tell the native app (if any)
-  const ring = $("ring"); ring.className = muted ? "muted" : s;
-  window.webkit?.messageHandlers?.guppy?.postMessage({ state: muted ? "muted" : s });
+  if (s !== "offline" && !muted && wakeEnabled && !awake && (s === "listening" || s === "asleep")) s = "asleep";
+  const shown = muted ? "muted" : s;
+  $("ring").className = shown;
+  window.webkit?.messageHandlers?.guppy?.postMessage({ state: shown });
+  if (!PET && shown === "asleep") setState('asleep: say "Guppy"');
 }
 let bubbleTimer;
 function bubble(text) {
@@ -223,9 +222,14 @@ let micTrack = null;
 window.guppyPet = {
   toggleMute() {
     muted = !muted; if (micTrack) micTrack.enabled = !muted;
-    petState(pc ? "listening" : "offline"); bubble(muted ? "Muted." : "Listening.");
-    armIdle();
+    petState(pc ? "listening" : "offline"); bubble(muted ? "Muted. Mic is off." : (awake ? "Listening." : 'Say "Guppy".'));
     return muted;
+  },
+  wake() {  // click on the head: unmute if needed and wake Guppy without the wake word
+    if (muted) { muted = false; if (micTrack) micTrack.enabled = true; }
+    if (dc?.readyState === "open") dc.send(JSON.stringify({ label: "rtvi-ai", type: "client-message", id: crypto.randomUUID(),
+                                                           data: { t: "wake", d: {} } }));
+    bubble("Listening.");
   },
   isMuted: () => muted,
   reconnect() { if (!pc) connect().catch(() => {}); },
@@ -236,11 +240,11 @@ function onRtvi(m) {
   if (m.label !== "rtvi-ai") return;
   window.guppy.events.push({ type: m.type, at: Math.round(performance.now()), data: m.data });
   switch (m.type) {
-    case "user-started-speaking": setState("hearing you…"); petState("hearing"); clearTimeout(idleTimer); break;
+    case "user-started-speaking": setState("hearing you…"); petState("hearing"); break;
     case "user-stopped-speaking": setState("thinking…"); petState("thinking"); break;
     case "user-transcription": if (m.data?.final) say("you", m.data.text); break;
-    case "bot-started-speaking": setState("speaking"); petState("speaking"); botLine = null; clearTimeout(idleTimer); break;
-    case "bot-stopped-speaking": setState("listening"); petState("listening"); armIdle(); break;
+    case "bot-started-speaking": setState("speaking"); petState("speaking"); botLine = null; break;
+    case "bot-stopped-speaking": setState(awake || !wakeEnabled ? "listening" : 'asleep: say "Guppy"'); petState("listening"); break;
     case "bot-output":  // once per sentence, as Guppy starts saying it
       if (m.data?.spoken_status !== "new") break;
       bubble(m.data?.text ?? "");
@@ -248,6 +252,11 @@ function onRtvi(m) {
       botLine.append((botLine.childNodes.length > 1 ? " " : "") + (m.data?.text ?? "")); $("log").scrollTop = 1e9;
       break;
     case "server-message":
+      if (m.data?.type === "wake") {
+        wakeEnabled = !!m.data.enabled; awake = !!m.data.awake;
+        petState(awake ? "listening" : "asleep");
+        if (!PET) setState(awake ? "listening" : 'asleep: say "Guppy"');
+      }
       if (m.data?.type === "mood" && MOODS[m.data.mood]) mood = MOODS[m.data.mood];
       if (m.data?.type === "task") showTask(m.data.task);
       break;

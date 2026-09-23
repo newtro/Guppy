@@ -7,6 +7,7 @@ Browser (mic w/ echo cancellation, avatar) <-WebRTC-> Pipecat pipeline:
 Barge-in: speaking over Guppy interrupts TTS (VAD user-start interrupts the bot).
 """
 import asyncio
+import json
 import os
 import subprocess
 import sys
@@ -28,7 +29,12 @@ from pipecat.pipeline.worker import PipelineParams, PipelineWorker
 from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.aggregators.llm_response_universal import LLMContextAggregatorPair, LLMUserAggregatorParams
 from pipecat.services.openai.llm import OpenAILLMService
+from pipecat.processors.frameworks.rtvi import RTVIServerMessageFrame
 from pipecat.transports.base_transport import TransportParams
+from pipecat.turns.user_start.transcription_user_turn_start_strategy import TranscriptionUserTurnStartStrategy
+from pipecat.turns.user_start.vad_user_turn_start_strategy import VADUserTurnStartStrategy
+from pipecat.turns.user_start.wake_phrase_user_turn_start_strategy import WakePhraseUserTurnStartStrategy
+from pipecat.turns.user_turn_strategies import UserTurnStrategies
 from pipecat.transports.smallwebrtc.connection import SmallWebRTCConnection
 from pipecat.transports.smallwebrtc.request_handler import (
     SmallWebRTCPatchRequest,
@@ -51,6 +57,21 @@ UI = Path(__file__).parent / "ui"
 LLM_MODEL = os.environ.get("GUPPY_REFLEX_MODEL", "mlx-community/Qwen3.5-9B-MLX-4bit")
 LLM_PORT = int(os.environ.get("GUPPY_REFLEX_PORT", "8081"))
 LLM_URL = f"http://127.0.0.1:{LLM_PORT}/v1"
+
+
+class WakeGate(WakePhraseUserTurnStartStrategy):
+    """Pipecat's wake-phrase gate, plus a manual wake (clicking Guppy's head)."""
+
+    def force_awake(self, reason: str = "click"):
+        self._transition_to_awake(reason)
+
+    @property
+    def awake(self) -> bool:
+        return self.state.value == "awake"
+
+
+def voice_spec() -> dict:
+    return json.loads((BODY / "persona" / "voice" / "voice.json").read_text())
 
 
 def persona() -> str:
@@ -93,10 +114,18 @@ async def run_bot(connection: SmallWebRTCConnection):
     await asyncio.gather(stt.load(), tts.load())
 
     context = LLMContext(messages=[{"role": "system", "content": persona()}], tools=TOOLS)
+    wake_cfg = voice_spec().get("wake", {})
+    wake = None
+    start = [VADUserTurnStartStrategy(), TranscriptionUserTurnStartStrategy()]
+    if wake_cfg.get("enabled"):
+        # Asleep: speech without the wake word is dropped and can't start a turn or interrupt Guppy.
+        wake = WakeGate(phrases=wake_cfg.get("phrases", ["guppy"]), timeout=wake_cfg.get("awake_timeout_s", 30))
+        start = [wake, *start]
     user_agg, assistant_agg = LLMContextAggregatorPair(
         context, user_params=LLMUserAggregatorParams(
             # 0.4s of silence before Smart Turn judges the turn: a pause after "Guppy," shouldn't end it.
-            vad_analyzer=SileroVADAnalyzer(params=VADParams(stop_secs=0.4))))
+            vad_analyzer=SileroVADAnalyzer(params=VADParams(stop_secs=0.4)),
+            user_turn_strategies=UserTurnStrategies(start=start)))
 
     pipeline = Pipeline([
         transport.input(), stt, user_agg, llm, MoodTagProcessor(), tts, transport.output(), assistant_agg,
@@ -115,6 +144,28 @@ async def run_bot(connection: SmallWebRTCConnection):
         context.add_message({"role": "assistant", "content": f"[deadpan] {greeting}"})
         await worker.queue_frames([TTSSpeakFrame(greeting)])
         await bridge.on_connect()  # HUD state + any Mind reports that finished while offline
+        await send_wake_state()
+
+    async def send_wake_state():
+        await worker.queue_frames([RTVIServerMessageFrame(data={"type": "wake", "awake": wake.awake if wake else True,
+                                                                "enabled": bool(wake)})])
+
+    if wake:
+        @wake.event_handler("on_wake_phrase_detected")
+        async def on_wake(strategy, phrase):
+            logger.info(f"Wake word heard: {phrase!r}")
+            await send_wake_state()
+
+        @wake.event_handler("on_wake_phrase_timeout")
+        async def on_sleep(strategy):
+            logger.info("Guppy went back to sleep (no activity)")
+            await send_wake_state()
+
+    @worker.rtvi.event_handler("on_client_message")
+    async def on_client_message(rtvi, msg):
+        if msg.type == "wake" and wake:
+            wake.force_awake("click")
+            await send_wake_state()
 
     runner = WorkerRunner(handle_sigint=False)
     await runner.add_workers(worker)

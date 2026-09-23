@@ -13,5 +13,15 @@
     "mode": "clone",
     "streaming_interval": 0.32
   },
-  "notes": "Designed voice (not a clone of any real person). Breeze weights are non-commercial; the reference clip is for personal use."
+  "notes": "Designed voice (not a clone of any real person). Breeze weights are non-commercial; the reference clip is for personal use.",
+  "wake": {
+    "enabled": true,
+    "phrases": [
+      "guppy",
+      "guppie",
+      "guppi",
+      "gupi"
+    ],
+    "awake_timeout_s": 30
+  }
 }

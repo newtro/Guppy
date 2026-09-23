@@ -25,10 +25,12 @@ Logs go to `~/Library/Logs/Guppy/kernel.log`.
 ```bash
 pet/build.sh --login           # builds ~/Applications/GuppyPet.app and starts it at login
 ```
-Guppy's head floats on the desktop, above other windows and on every Space. **Click** the head to talk (it
-listens until 30 s pass with no conversation, then mutes itself); **drag** to move it; **right-click** for
-mute, size, the full view, and quit. The bar under the head: red = muted, blue = listening, bright blue =
-hearing you, orange = thinking or speaking, grey = offline. First start downloads models (~10 GB).
+Guppy's head floats on the desktop, above other windows and on every Space. Say **"Guppy, ..."** to talk; he stays
+awake for 30 s after the conversation goes quiet, then sleeps again (speech without the wake word is ignored and
+can't interrupt him). **Click** the head to wake him without the wake word; **drag** to move it; **right-click** for
+mute (mic fully off), size, the full view, and quit. The bar under the head: faint blue = asleep, blue = awake,
+bright blue = hearing you, orange = thinking or speaking, red = muted, grey = offline. Wake phrases and the awake
+timeout live in `body/persona/voice/voice.json` (Guppy can tune them). First start downloads models (~10 GB).
 The avatar model (`body/avatar/guppy_head.glb`) is not in the repo; build it with `spikes/avatar/`.
 
 ## Layout
