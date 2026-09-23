@@ -41,6 +41,8 @@ CASES = [
     ("Guppy, write a short blog post draft about local AI assistants.", "delegate_to_mind", None),
     ("Guppy, give yourself the ability to check my Mac's battery level.", "improve_self", None),
     ("Guppy, I'd like you to be a bit more sarcastic from now on.", "improve_self", None),
+    ("Can you build yourself a new capability? A calculator app that shows on screen whenever I ask you to do math.",
+     "improve_self", None),
     ("Guppy, undo that last change you made to yourself.", "undo_last_change", None),
     ("Guppy, what changes have you made to yourself lately?", "list_changes", None),
     ("Guppy, remind me in 20 minutes to stretch.", "schedule_task", lambda a: once(a["when"])),

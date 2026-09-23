@@ -22,8 +22,8 @@
       "guppi",
       "gupi"
     ],
-    "awake_timeout_s": 12,
-    "every_turn": true,
+    "awake_timeout_s": 20,
+    "every_turn": false,
     "bare_aliases": [
       "copy",
       "coffee",
