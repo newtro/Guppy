@@ -240,10 +240,12 @@ async def run_bot(connection: SmallWebRTCConnection):
 
     runner = WorkerRunner(handle_sigint=False)
     await runner.add_workers(worker)
+    live_workers.add(worker)
 
     @transport.event_handler("on_client_disconnected")
     async def on_client_disconnected(transport, client):
         logger.info("Admiral disconnected")
+        live_workers.discard(worker)
         tasks.listeners.remove(bridge.on_task)
         selfmod.listeners.remove(bridge.on_change)
         gate.listeners.remove(bridge.on_action)
@@ -267,6 +269,7 @@ async def watch_reflex_llm():
                 logger.exception("Reflex LLM restart failed")
 
 
+live_workers: set = set()  # connected voice sessions (for /api/display)
 webrtc = SmallWebRTCRequestHandler()
 tasks = TaskManager()
 reflex_tools = ReflexToolHost(BODY)
@@ -355,6 +358,18 @@ async def gate_taint(body: dict):
 async def gate_actions(limit: int = 20):
     return gate.list(limit=limit)
 # Deliberately no HTTP endpoint to confirm or cancel actions: only the Admiral's voice can.
+
+
+@app.post("/api/display")
+async def display(body: dict, request: Request):
+    """Show a card next to Guppy's head in every connected session: {"title": ..., "lines": [...], "seconds": n}."""
+    if request.client.host != "127.0.0.1":
+        return {"shown": 0}
+    card = {"title": str(body.get("title", ""))[:60], "lines": [str(x)[:80] for x in body.get("lines", [])][:8],
+            "seconds": min(max(int(body.get("seconds", 12)), 2), 120)}
+    for w in list(live_workers):
+        await w.queue_frames([RTVIServerMessageFrame(data={"type": "display", "display": card})])
+    return {"shown": len(live_workers)}
 
 
 @app.get("/api/schedules")

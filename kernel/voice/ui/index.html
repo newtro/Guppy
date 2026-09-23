@@ -236,7 +236,9 @@ async function connect() {
 }
 
 function hangup() {
-  if (PET) { petState("offline"); setTimeout(() => window.guppyPet.reconnect(), 5000); }
+  // Reload the whole page (not just the connection): a kernel restart may have shipped a new UI.
+  // If the kernel is still down the load fails and GuppyPet retries every 5 s.
+  if (PET) { petState("offline"); setTimeout(() => location.reload(), 5000); }
   try { pc?.close(); } catch {} pc = null;
   $("connect").textContent = "🎙 Talk to Guppy"; $("connect").classList.remove("on"); setState("offline");
 }
