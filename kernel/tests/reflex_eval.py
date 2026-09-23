@@ -59,7 +59,7 @@ def ask(url: str, model: str, tools: list, persona: str, text: str) -> tuple[dic
     body = json.dumps({"model": model, "tools": tools, "messages": [
         {"role": "system", "content": persona},
         {"role": "assistant", "content": "[deadpan] Aye, Admiral. Guppy online."},
-        {"role": "user", "content": text}]}).encode()
+        {"role": "user", "content": f"{text}\n\n{now_note()}"}]}).encode()  # as ContextTrimmer stamps it
     t0 = time.perf_counter()
     with urllib.request.urlopen(urllib.request.Request(f"{url}/chat/completions", body,
                                                        {"Content-Type": "application/json"}), timeout=120) as r:
@@ -75,7 +75,7 @@ def main():
     ap.add_argument("--runs", type=int, default=1)
     a = ap.parse_args()
     tools = OpenAILLMAdapter().to_provider_tools_format(TOOLS)
-    persona = (ROOT / "body/persona/guppy.md").read_text() + "\n\n" + now_note()
+    persona = (ROOT / "body/persona/guppy.md").read_text()
     ask(a.url, a.model, tools, persona, "hi")  # warm-up: load weights, cache the prompt prefix
     ok, lat, fails = 0, [], []
     for _ in range(a.runs):

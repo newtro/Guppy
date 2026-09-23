@@ -153,6 +153,24 @@ async def ensure_reflex_llm() -> subprocess.Popen | None:
     return proc
 
 
+async def warm_prompt_cache(system: str, tools: list):
+    """Pre-read this session's system prompt + tools so the first question doesn't pay for it (~5s cold). The
+    server checkpoints its cache at the end of the system segment; every turn of the session reuses it."""
+    import time
+    t0 = time.perf_counter()
+    try:
+        async with httpx.AsyncClient() as http:
+            await http.post(f"{LLM_URL}/chat/completions", timeout=120, json={
+                "model": LLM_MODEL, "max_tokens": 1, "tools": tools,
+                # Same shape as a live session (system, then the greeting): the server's system checkpoint ends
+                # just inside the next message's role marker, so that message must be an assistant one.
+                "messages": [{"role": "system", "content": system}, {"role": "assistant", "content": "."},
+                             {"role": "user", "content": "."}]})
+        logger.debug(f"Reflex prompt cache warmed in {time.perf_counter() - t0:.2f}s")
+    except httpx.HTTPError as e:
+        logger.warning(f"Prompt cache warm-up failed: {e}")
+
+
 async def run_bot(connection: SmallWebRTCConnection):
     transport = SmallWebRTCTransport(
         webrtc_connection=connection,
@@ -166,7 +184,10 @@ async def run_bot(connection: SmallWebRTCConnection):
 
     await reflex_tools.refresh()  # Guppy-built instant tools (restarted if their capability changed)
     session_tools = ToolsSchema(standard_tools=[*TOOLS.standard_tools, *reflex_tools.function_schemas()])
-    context = LLMContext(messages=[{"role": "system", "content": persona()}], tools=session_tools)
+    system_prompt = persona()
+    context = LLMContext(messages=[{"role": "system", "content": system_prompt}], tools=session_tools)
+    warmup = asyncio.create_task(warm_prompt_cache(
+        system_prompt, llm.get_llm_adapter().to_provider_tools_format(session_tools)))
     wake_cfg = voice_spec().get("wake", {})
     wake = None
     # With speaker verification, turns (and interruptions) start only from verified transcripts: raw voice
