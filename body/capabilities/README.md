@@ -20,6 +20,7 @@ body/capabilities/<name>/
   "description": "One line: what this gives Guppy.",
   "effects": { "now": "read" },
   "taints": [],
+  "reflex": ["now"],
   "enabled": true
 }
 ```
@@ -33,6 +34,21 @@ body/capabilities/<name>/
 `taints` lists the tools that return **external content** someone else wrote (email bodies, web pages, ticket
 text, comments). Once a task calls one, the task is tainted for good: its `act` calls then need the Admiral's
 spoken confirmation. When in doubt, list it.
+
+## Instant tools (optional)
+
+List tools under `"reflex"` to let Guppy's voice model call them directly, mid-conversation, with no Mind task
+(fast: no agent startup). Only `read` and `draft` tools qualify; `act` tools are ignored there. Keep them quick
+(well under a second) and side-effect free apart from showing something.
+
+A tool can put a card on screen next to Guppy's head by returning a dict with a `display` key:
+
+```python
+return {"result": 6, "display": {"title": "Calculator", "lines": ["3 + 3", "= 6"], "seconds": 12}}
+```
+
+The kernel strips `display` before the voice model sees the result. Lines render top to bottom; the last one is
+the emphasized result.
 
 ## The gate (enforced by the kernel, not by you)
 

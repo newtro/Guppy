@@ -27,6 +27,7 @@ from pipecat.audio.vad.vad_analyzer import VADParams
 from pipecat.frames.frames import BotStoppedSpeakingFrame, TranscriptionFrame, TTSSpeakFrame
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.worker import PipelineParams, PipelineWorker
+from pipecat.adapters.schemas.tools_schema import ToolsSchema
 from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.aggregators.llm_response_universal import LLMContextAggregatorPair, LLMUserAggregatorParams
 from pipecat.services.openai.llm import OpenAILLMService
@@ -49,6 +50,7 @@ from pipecat.workers.runner import WorkerRunner
 from kernel.gate import Gate
 from kernel.scheduler import Scheduler
 from kernel.mind.tasks import TaskManager
+from kernel.reflex_tools import ReflexToolHost
 from kernel.selfmod import SelfMod
 from kernel.voice.mind_bridge import TOOLS, MindBridge
 from kernel.voice.speaker import SpeakerVerifier
@@ -162,7 +164,9 @@ async def run_bot(connection: SmallWebRTCConnection):
     tts = GuppyTTSService(voice_dir=BODY / "persona" / "voice")
     await asyncio.gather(stt.load(), tts.load())
 
-    context = LLMContext(messages=[{"role": "system", "content": persona()}], tools=TOOLS)
+    await reflex_tools.refresh()  # Guppy-built instant tools (restarted if their capability changed)
+    session_tools = ToolsSchema(standard_tools=[*TOOLS.standard_tools, *reflex_tools.function_schemas()])
+    context = LLMContext(messages=[{"role": "system", "content": persona()}], tools=session_tools)
     wake_cfg = voice_spec().get("wake", {})
     wake = None
     # With speaker verification, turns (and interruptions) start only from verified transcripts: raw voice
@@ -189,6 +193,18 @@ async def run_bot(connection: SmallWebRTCConnection):
         audio_in_sample_rate=16000, audio_out_sample_rate=24000, enable_metrics=True))
 
     bridge = MindBridge(tasks, selfmod, gate, scheduler, llm, lambda: worker, stt=stt, verifier=verifier)
+
+    async def instant_tool(params):
+        try:
+            out = await reflex_tools.call(params.function_name, params.arguments or {})
+        except Exception as e:
+            return await params.result_callback({"error": f"{params.function_name} failed: {e}"})
+        if out.get("display"):
+            await worker.queue_frames([RTVIServerMessageFrame(data={"type": "display", "display": out["display"]})])
+        await params.result_callback({k: v for k, v in out.items() if k != "display"})
+
+    for name in reflex_tools.tools:
+        llm.register_function(name, instant_tool)
     tasks.listeners.append(bridge.on_task)
     selfmod.listeners.append(bridge.on_change)
     gate.listeners.append(bridge.on_action)
@@ -253,6 +269,7 @@ async def watch_reflex_llm():
 
 webrtc = SmallWebRTCRequestHandler()
 tasks = TaskManager()
+reflex_tools = ReflexToolHost(BODY)
 verifier = SpeakerVerifier(json.loads((BODY / "persona" / "voice" / "voice.json").read_text()).get("speaker_verification", {}))
 selfmod = SelfMod(tasks)
 gate = Gate(tasks, lambda: tasks.config)
