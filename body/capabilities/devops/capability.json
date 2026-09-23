@@ -1,0 +1,15 @@
+{
+  "name": "devops",
+  "description": "The Admiral's Azure DevOps work items in clientsystems/scv2: read the sprint, read a ticket, update, comment, and create.",
+  "effects": {
+    "my_work_items": "read",
+    "sprint_summary": "read",
+    "get_work_item": "read",
+    "search_work_items": "read",
+    "update_work_item": "act",
+    "add_comment": "act",
+    "create_work_item": "act"
+  },
+  "taints": ["get_work_item", "search_work_items"],
+  "enabled": true
+}
