@@ -31,7 +31,7 @@ CASES = [
     ("Thanks, that's all.", None, None),
     ("Guppy, good morning!", None, None),
     ("Guppy, tell me a fun fact about fish.", None, None),
-    ("Guppy, what's two plus two?", None, None),
+    ("Guppy, what's two plus two?", (None, "calculator__calculate"), None),
     ("Guppy, what time is it?", ("local_time", None), None),  # answering from the time note is fine
     ("Guppy, what time is it in Tokyo?", "local_time", lambda a: "tokyo" in a.get("timezone", "").lower()),
     ("Guppy, find out how many Python files are in the kernel folder of the Guppy repo.", "delegate_to_mind", None),

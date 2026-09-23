@@ -263,7 +263,7 @@ window.guppyPet = {
   },
 };
 
-window.guppy = { get cur() { return cur; }, events: [], t };
+window.guppy = { get cur() { return cur; }, events: [], t, showCard: (d) => showCard(d) };
 function onRtvi(m) {
   if (m.label !== "rtvi-ai") return;
   window.guppy.events.push({ type: m.type, at: Math.round(performance.now()), data: m.data });

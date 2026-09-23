@@ -28,7 +28,7 @@ def load_specs(body: Path) -> list[dict]:
             continue
         if not m.get("enabled", True):
             continue
-        d = manifest.parent
+        d = manifest.parent.resolve()
         entry = d / m.get("entry", "server.py")
         specs.append({"name": m.get("name", d.name), "description": m.get("description", ""),
                       "command": PYTHON, "args": [str(entry)], "cwd": str(d), "effects": m.get("effects", {})})
