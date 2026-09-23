@@ -41,18 +41,34 @@ def _text(content) -> str:
     return ""
 
 
+NOW_TAG = "[Current local time]"
+
+
+def now_note() -> str:
+    from datetime import datetime
+    now = datetime.now().astimezone()
+    return (f"{NOW_TAG} It is {now.strftime('%A, %B %-d, %Y, %-I:%M %p %Z')} for the Admiral. "
+            "Use this for any question about the current time or date; do not guess.")
+
+
 class ContextTrimmer(FrameProcessor):
+    """Also refreshes a system note with the current local time before every LLM call (a small model will
+    otherwise invent a time rather than call a tool)."""
+
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
         if isinstance(frame, LLMContextFrame):
             msgs = frame.context.get_messages()
             system = [m for m in msgs if isinstance(m, dict) and m.get("role") == "system"]
             rest = [m for m in msgs if not (isinstance(m, dict) and m.get("role") == "system")]
+            if system:  # the model accepts one system message only: keep the note at the end of it, refreshed
+                base = str(system[0].get("content", "")).split("\n\n" + NOW_TAG)[0]
+                system = [{**system[0], "content": f"{base}\n\n{now_note()}"}]
             if len(rest) > KEEP_MESSAGES:
                 rest = rest[-KEEP_MESSAGES:]
                 while rest and not (isinstance(rest[0], dict) and rest[0].get("role") == "user"):
                     rest.pop(0)  # never start mid tool-call exchange
-                frame.context.set_messages(system + rest)
+            frame.context.set_messages(system + rest)
         await self.push_frame(frame, direction)
 
 

@@ -238,7 +238,8 @@ class MindBridge:
             now = datetime.now(ZoneInfo(tz)) if tz else datetime.now().astimezone()
         except (ZoneInfoNotFoundError, ValueError):
             return await params.result_callback({"error": f"unknown timezone {tz!r}; use an IANA name like Asia/Tokyo"})
-        await params.result_callback({"timezone": tz or "local", "time": now.strftime("%A %B %-d, %-I:%M %p %Z")})
+        await params.result_callback({"timezone": tz or "local", "time": now.strftime("%A %B %-d, %-I:%M %p %Z"),
+                                      "say_it_like": "12-hour clock with AM/PM, e.g. 'ten twenty-seven PM'"})
 
     def _pending(self, params: FunctionCallParams) -> dict | None:
         aid = params.arguments.get("action_id")
