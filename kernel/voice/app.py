@@ -130,6 +130,21 @@ async def run_bot(connection: SmallWebRTCConnection):
     await runner.run()
 
 
+async def watch_reflex_llm():
+    """Restart the reflex LLM server if it dies (launchd only watches the kernel process itself)."""
+    while True:
+        await asyncio.sleep(30)
+        try:
+            async with httpx.AsyncClient() as http:
+                await http.get(f"{LLM_URL}/models", timeout=5)
+        except httpx.HTTPError:
+            logger.warning("Reflex LLM is down; restarting it")
+            try:
+                state["llm_proc"] = await ensure_reflex_llm()
+            except Exception:
+                logger.exception("Reflex LLM restart failed")
+
+
 webrtc = SmallWebRTCRequestHandler()
 tasks = TaskManager()
 selfmod = SelfMod(tasks)
@@ -144,6 +159,7 @@ async def lifespan(app: FastAPI):
     # Preload STT + TTS so the first connection is instant.
     await asyncio.gather(ParakeetSTTService().load(), GuppyTTSService(voice_dir=BODY / "persona" / "voice").load())
     scheduler.start()
+    state["llm_watch"] = asyncio.create_task(watch_reflex_llm())
     logger.info("Guppy is listening: http://127.0.0.1:8765")
     yield
     await webrtc.close()
