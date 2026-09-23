@@ -1,0 +1,10 @@
+{
+  "name": "calculator",
+  "description": "Does arithmetic out loud and puts the sum on screen: + - * / // % ^, parentheses, sqrt, abs, round, min, max, pi and e.",
+  "effects": {
+    "calculate": "read"
+  },
+  "taints": [],
+  "reflex": ["calculate"],
+  "enabled": true
+}
