@@ -77,7 +77,27 @@ class WakeGate(WakePhraseUserTurnStartStrategy):
         self._bare_wake = True  # a click is like saying just "Guppy"
         self._transition_to_awake(reason)
 
+    @staticmethod
+    def _sounds_like_guppy(word: str) -> bool:
+        import difflib
+        w = re.sub(r"[^a-z]", "", word.lower())
+        return 4 <= len(w) <= 7 and w[0] in "gkc" and difflib.SequenceMatcher(None, w, "guppy").ratio() >= 0.6
+
+    def _normalize_vocative(self, frame):
+        """'Gopy, what time is it?' -> 'Guppy, what time is it?': fuzzy-match the word the Admiral addresses him with."""
+        words = frame.text.split()
+        for i in range(min(2, len(words))):
+            if i == 1 and re.sub(r"[^a-z]", "", words[0].lower()) not in ("hey", "ok", "okay"):
+                break
+            if self._sounds_like_guppy(words[i]) and not any(re.fullmatch(p, re.sub(r"[^a-z]", "", words[i].lower())) for p in self._phrases):
+                logger.info(f"Heard {words[i]!r} as 'Guppy'")
+                words[i] = "Guppy" + re.sub(r"[A-Za-z]", "", words[i])  # keep trailing punctuation
+                frame.text = " ".join(words)
+                return
+
     async def process_frame(self, frame):
+        if isinstance(frame, TranscriptionFrame) and not self.awake:
+            self._normalize_vocative(frame)
         if isinstance(frame, TranscriptionFrame) and not self.awake:
             words = re.sub(r"[^\w\s]", "", frame.text.lower()).split()
             if 1 <= len(words) <= 2 and set(words) - {"hey", "ok", "okay"} <= self._bare_aliases and words[-1] in self._bare_aliases:
