@@ -2,11 +2,16 @@
 
 ContextTrimmer   keeps the context to the system prompt + recent turns. The pet stays connected for days; a
                  9B model's tool calling degrades as the context grows.
+ToolFiller       speaks a short in-character line the moment a tool call starts, so there's no dead air while the
+                 tool runs and the LLM phrases the answer. Lines: body/persona/voice/fillers.json.
 PromiseKeeper    if Guppy says he'll have the Mind do something but made no tool call, file the task anyway
                  (the Admiral's last request), so "Aye, I'll check" never silently means nothing.
 """
+import json
+import random
 import re
 import time
+from pathlib import Path
 
 from loguru import logger
 
@@ -17,6 +22,7 @@ from pipecat.frames.frames import (
     LLMFullResponseEndFrame,
     LLMFullResponseStartFrame,
     LLMTextFrame,
+    TTSSpeakFrame,
 )
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 
@@ -83,3 +89,33 @@ class PromiseKeeper(FrameProcessor):
         logger.warning(f"Reflex promised work without a tool call; filing it: {request[:80]!r}")
         await self.tasks.submit(request, role="general", provenance="admiral")
         self._last_tool_call = time.time()
+
+
+SILENT_TOOLS = {"confirm_action", "cancel_action", "cancel_mind_task", "cancel_schedule", "undo_last_change"}
+
+
+class ToolFiller(FrameProcessor):
+    def __init__(self, fillers_path: Path, **kwargs):
+        super().__init__(**kwargs)
+        self.path = fillers_path
+
+    def _line(self, names: list[str]) -> str | None:
+        try:
+            lines = json.loads(self.path.read_text())  # re-read: Guppy may edit it
+        except (OSError, json.JSONDecodeError):
+            return "One moment, Admiral."
+        for n in names:
+            if n in SILENT_TOOLS:
+                return None
+        for n in names:
+            if lines.get(n):
+                return random.choice(lines[n])
+        return random.choice(lines.get("default") or ["One moment, Admiral."])
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+        await self.push_frame(frame, direction)
+        if isinstance(frame, FunctionCallsStartedFrame) and direction == FrameDirection.DOWNSTREAM:
+            line = self._line([fc.function_name for fc in frame.function_calls])
+            if line:
+                await self.push_frame(TTSSpeakFrame(line), FrameDirection.DOWNSTREAM)

@@ -192,6 +192,8 @@ async function connect() {
     if (e.track.kind !== "audio") return;
     const stream = new MediaStream([e.track]);
     $("remote").srcObject = stream;                        // playback
+    if (TEST) $("remote").muted = true;  // automated checks must never talk over the Admiral's live Guppy
+    if (TEST) $("remote").muted = true;  // automated checks must never talk over the Admiral's live Guppy
     ctx.createMediaStreamSource(stream).connect(analyser); // lip-sync analysis (not routed to speakers)
   };
   pc.onconnectionstatechange = () => {

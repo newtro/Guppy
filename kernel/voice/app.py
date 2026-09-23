@@ -51,7 +51,7 @@ from kernel.scheduler import Scheduler
 from kernel.mind.tasks import TaskManager
 from kernel.selfmod import SelfMod
 from kernel.voice.mind_bridge import TOOLS, MindBridge
-from kernel.voice.guards import ContextTrimmer, PromiseKeeper
+from kernel.voice.guards import ContextTrimmer, PromiseKeeper, ToolFiller
 from kernel.voice.services import GuppyTTSService, MoodTagProcessor, ParakeetSTTService
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -156,7 +156,8 @@ async def run_bot(connection: SmallWebRTCConnection):
             user_turn_strategies=UserTurnStrategies(start=start)))
 
     pipeline = Pipeline([
-        transport.input(), stt, user_agg, ContextTrimmer(), llm, PromiseKeeper(context, tasks), MoodTagProcessor(),
+        transport.input(), stt, user_agg, ContextTrimmer(), llm, ToolFiller(BODY / "persona" / "voice" / "fillers.json"),
+        PromiseKeeper(context, tasks), MoodTagProcessor(),
         tts, transport.output(), assistant_agg,
     ])
     worker = PipelineWorker(pipeline, params=PipelineParams(
