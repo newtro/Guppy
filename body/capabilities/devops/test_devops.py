@@ -148,7 +148,9 @@ def test_every_tool_has_a_description_for_the_mind():
 def test_config_holds_the_admirals_project_and_no_secret():
     raw = json.loads((HERE / "config.json").read_text())
     assert raw == {"org": "clientsystems", "project": "scv2", "team": "SCV2 Team",
-                   "tenant": "matw.com", "api_version": "7.1"}
+                   "tenant": "matw.com",
+                   "subscription": "96139de4-a552-4f6d-90e9-20fcad3d55fd",
+                   "api_version": "7.1"}
     blob = json.dumps(raw).lower()
     for word in ("token", "secret", "password", "pat", "key"):
         assert word not in blob
@@ -174,13 +176,18 @@ def test_login_hint_is_the_exact_command_the_admiral_must_run():
     assert "--allow-no-subscriptions" in hint
 
 
+def test_login_hint_says_which_account_must_be_signed_in():
+    assert "matw.com account has to be signed in" in devops.login_hint()
+
+
 # --- the token ---------------------------------------------------------------------------------
 
 def test_token_comes_from_the_az_cli():
     assert devops.access_token(runner=fake_az("eyJ.abc\n")) == "eyJ.abc"
 
 
-def test_token_is_asked_for_with_the_right_resource_and_tenant():
+def test_token_is_asked_for_with_the_right_resource_and_subscription():
+    """The subscription, not the tenant, picks the identity: --tenant lands on the wrong account."""
     asked = {}
 
     def runner(args, **kwargs):
@@ -190,7 +197,21 @@ def test_token_is_asked_for_with_the_right_resource_and_tenant():
     devops.access_token(runner=runner)
     assert asked["args"] == ["az", "account", "get-access-token",
                              "--resource", "499b84ac-1321-427f-aa17-267ca6975798",
-                             "--tenant", "matw.com", "--query", "accessToken", "-o", "tsv"]
+                             "--subscription", "96139de4-a552-4f6d-90e9-20fcad3d55fd",
+                             "--query", "accessToken", "-o", "tsv"]
+    assert "--tenant" not in asked["args"]
+
+
+def test_the_subscription_comes_from_config_not_a_hard_coded_id(monkeypatch):
+    monkeypatch.setattr(devops, "_config_cache", {**devops.config(), "subscription": "sub-from-config"})
+    asked = {}
+
+    def runner(args, **kwargs):
+        asked["args"] = args
+        return SimpleNamespace(returncode=0, stdout="eyJ.x", stderr="")
+
+    devops.access_token(runner=runner)
+    assert "sub-from-config" in asked["args"]
 
 
 def test_a_failed_login_tells_the_admiral_how_to_fix_it():
@@ -200,6 +221,7 @@ def test_a_failed_login_tells_the_admiral_how_to_fix_it():
     message = str(err.value)
     assert "AADSTS50020" in message
     assert "az login --tenant matw.com" in message
+    assert "96139de4-a552-4f6d-90e9-20fcad3d55fd" in message
 
 
 def test_an_empty_token_is_a_failure_not_a_blank_bearer():

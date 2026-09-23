@@ -1,10 +1,13 @@
 """Azure DevOps capability: the Admiral's work items in clientsystems/scv2.
 
 No secret is stored anywhere. At call time a short-lived bearer token is minted from the Admiral's
-own `az` CLI login (the Azure DevOps resource id 499b84ac-...). That token is used for exactly one
-HTTP call and is never printed, logged, returned to the Mind, or written to disk.
+own `az` CLI login (the Azure DevOps resource id 499b84ac-...), pinned to the configured
+subscription so the right signed-in identity is used. That token is used for exactly one HTTP call
+and is never printed, logged, returned to the Mind, or written to disk.
 
-Non-secret settings (org, project, team, tenant, api version) live in config.json beside this file.
+Non-secret settings (org, project, team, tenant, subscription, api version) live in config.json
+beside this file. The subscription picks the identity for the token; the tenant is only used in the
+"here is how to sign in" help message.
 
 Plain functions hold the logic (tested in test_devops.py); the MCP tools are thin wrappers.
 """
@@ -47,7 +50,7 @@ _config_cache: dict | None = None
 # --- settings ----------------------------------------------------------------------------------
 
 def config() -> dict:
-    """The non-secret settings beside this file: org, project, team, tenant, api_version."""
+    """The non-secret settings beside this file: org, project, team, tenant, subscription, api_version."""
     global _config_cache
     if _config_cache is None:
         _config_cache = json.loads(CONFIG_PATH.read_text())
@@ -80,7 +83,8 @@ def preview_version(minor: str) -> str:
 def login_hint() -> str:
     """Exactly what the Admiral has to run to make this capability work."""
     tenant = config()["tenant"]
-    return (f'Run: az login --tenant {tenant} --scope "{DEVOPS_RESOURCE}/.default" --allow-no-subscriptions')
+    return (f'The {tenant} account has to be signed in to the az CLI. '
+            f'Run: az login --tenant {tenant} --scope "{DEVOPS_RESOURCE}/.default" --allow-no-subscriptions')
 
 
 # --- the token ---------------------------------------------------------------------------------
@@ -88,12 +92,14 @@ def login_hint() -> str:
 def access_token(runner: Callable[..., Any] = subprocess.run) -> str:
     """A short-lived Azure DevOps bearer token from the Admiral's az CLI login.
 
-    Never logged, never returned to the Mind, never written down. Only az's *stderr* is ever quoted
-    back, because its stdout is the token itself.
+    The token is minted against the configured subscription rather than the tenant: the Admiral's az
+    CLI holds several signed-in accounts, and only the subscription names the one that can see this
+    organisation. Never logged, never returned to the Mind, never written down. Only az's *stderr* is
+    ever quoted back, because its stdout is the token itself.
     """
-    tenant = config()["tenant"]
+    subscription = config()["subscription"]
     command = ["az", "account", "get-access-token", "--resource", DEVOPS_RESOURCE,
-               "--tenant", tenant, "--query", "accessToken", "-o", "tsv"]
+               "--subscription", subscription, "--query", "accessToken", "-o", "tsv"]
     try:
         done = runner(command, capture_output=True, text=True, timeout=60)
     except FileNotFoundError:
@@ -105,7 +111,7 @@ def access_token(runner: Callable[..., Any] = subprocess.run) -> str:
         detail = (done.stderr or "").strip().splitlines()
         reason = detail[0][:200] if detail else "no detail from az"
         raise RuntimeError(
-            f"Could not get an Azure DevOps token for tenant {tenant} ({reason}). {login_hint()}"
+            f"Could not get an Azure DevOps token from subscription {subscription} ({reason}). {login_hint()}"
         )
     return token
 
