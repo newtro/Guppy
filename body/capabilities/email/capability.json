@@ -1,0 +1,11 @@
+{
+  "name": "email",
+  "description": "Guppy's own mailbox: reads and sends mail as Guppy <guppy@johnnycode.ai> through the Admiral's Remail.",
+  "effects": {
+    "list_inbox": "read",
+    "read_email": "read",
+    "send_email": "act"
+  },
+  "taints": ["list_inbox", "read_email"],
+  "enabled": true
+}
