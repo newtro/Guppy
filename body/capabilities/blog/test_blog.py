@@ -1,8 +1,8 @@
 """Tests for the blog capability.
 
-Everything is mocked: the Keychain lookup, the Tripo CLI and sips are fake subprocess runners, and
-the HTTP layer is an httpx.MockTransport. No test touches johnnycode.ai, spends a Tripo credit, or
-opens a socket — an autouse fixture makes a forgotten mock fail instead.
+Everything is mocked: the Keychain lookup is a fake, the codex and grok CLIs and sips are fake
+subprocess runners, and the HTTP layer is an httpx.MockTransport. No test touches johnnycode.ai,
+really runs a generator, or opens a socket — an autouse fixture makes a forgotten mock fail instead.
 """
 from __future__ import annotations
 
@@ -68,23 +68,48 @@ def client_factory_for(handler):
     return factory
 
 
-def fake_tools(source_size=(2048, 2048), tripo_extra: dict | None = None,
-               image_name: str = "generated_image.png", seen: list | None = None,
-               tripo_stdout: str | None = None):
-    """One runner standing in for both the Tripo CLI and sips, writing plausible files as it goes."""
+# What a generator does this run: "error" exits non-zero, "missing" is a CLI that is not installed,
+# "timeout" never finishes, "nothing" writes no file, "junk" writes a file that is not an image.
+FAILURES = ("error", "missing", "timeout", "nothing", "junk")
+
+
+def workdir_of(command: list[str], kwargs: dict) -> Path:
+    """Where a generator was pointed: codex takes -C, grok is simply run in the directory."""
+    if command[0] == "codex":
+        return Path(command[command.index("-C") + 1])
+    return Path(kwargs["cwd"])
+
+
+def fake_tools(source_size=(1672, 941), seen: list | None = None, calls: list | None = None,
+               image_names: dict | None = None, fails: dict | None = None):
+    """One runner standing in for the codex and grok CLIs and for sips, writing plausible files."""
+    names = {"codex": "hero.png", "grok": "hero.jpg", **(image_names or {})}
+    fails = fails or {}
+    for provider, mode in fails.items():
+        assert mode in FAILURES, f"unknown failure mode {mode!r}"
+
     def runner(command, **kwargs):
         if seen is not None:
             seen.append(list(command))
-        if command[0] == "tripo":
-            out_dir = Path(command[command.index("-o") + 1])
+        if calls is not None:
+            calls.append({"command": list(command), **kwargs})
+        if command[0] in ("codex", "grok"):
+            mode = fails.get(command[0])
+            if mode == "missing":
+                raise FileNotFoundError(command[0])
+            if mode == "timeout":
+                raise subprocess.TimeoutExpired(command, kwargs.get("timeout", 240))
+            out_dir = workdir_of(command, kwargs)
             out_dir.mkdir(parents=True, exist_ok=True)
-            if image_name:
-                (out_dir / image_name).write_bytes(PNG_BYTES)
-            payload = {"task_id": "t-1", "type": "text_to_image", "status": "success",
-                       "credits_consumed": 5, "output_dir": str(out_dir),
-                       "files": [image_name] if image_name else [], **(tripo_extra or {})}
-            stdout = tripo_stdout if tripo_stdout is not None else json.dumps(payload) + "\n"
-            return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
+            if mode == "error":
+                return SimpleNamespace(returncode=1, stdout="",
+                                       stderr=f"{command[0]}: usage limit reached")
+            if mode == "junk":
+                (out_dir / "hero.png").write_bytes(b"this is not an image")
+            elif mode != "nothing":
+                name = names[command[0]]
+                (out_dir / name).write_bytes(PNG_BYTES if name.endswith(".png") else JPEG_BYTES)
+            return SimpleNamespace(returncode=0, stdout=f"{out_dir}/{names[command[0]]}\n", stderr="")
         if command[0] == "sips":
             if "-g" in command:
                 width, height = source_size
@@ -101,7 +126,7 @@ def fake_tools(source_size=(2048, 2048), tripo_extra: dict | None = None,
 
 @pytest.fixture(autouse=True)
 def no_real_world(monkeypatch):
-    """Belt and braces: a test that forgets a mock fails instead of publishing or spending credits."""
+    """Belt and braces: a test that forgets a mock fails instead of publishing or running a CLI."""
     def refuse_network(**kwargs):
         raise AssertionError("a test tried to open a real connection to the blog")
 
@@ -118,6 +143,11 @@ def workspace(tmp_path, monkeypatch):
     settings = {**blog.config()["image"], "working_dir": str(tmp_path / "blog-images")}
     monkeypatch.setattr(blog, "_config_cache", {**blog.config(), "image": settings})
     return tmp_path
+
+
+def override_config(monkeypatch, **changes):
+    """Change a top-level setting (providers, timeouts) on top of whatever is already loaded."""
+    monkeypatch.setattr(blog, "_config_cache", {**blog.config(), **changes})
 
 
 POST_METADATA = {
@@ -175,6 +205,8 @@ def test_config_holds_the_non_secret_settings_and_no_token():
     assert settings["base_url"] == "https://johnnycode.ai"
     assert settings["image"]["width"] == 1600 and settings["image"]["height"] == 900
     assert settings["image"]["max_bytes"] <= 8 * 1024 * 1024
+    assert settings["image_providers"] == ["codex", "grok"]
+    assert settings["image_timeouts"] == {"codex": 240, "grok": 180}
     assert "token" not in raw.lower() and "secret" not in raw.lower()
 
 
@@ -441,69 +473,105 @@ def test_compose_prompt_needs_an_idea():
         blog.compose_prompt("   ")
 
 
-def test_parse_tripo_json_reads_the_last_json_line():
-    assert blog.parse_tripo_json('noise\n{"status": "success"}\n')["status"] == "success"
-    with pytest.raises(RuntimeError, match="did not return a result"):
-        blog.parse_tripo_json("no json at all\n")
+def test_providers_and_timeouts_come_from_config():
+    assert blog.image_providers() == ["codex", "grok"]
+    assert blog.image_timeout("codex") == 240
+    assert blog.image_timeout("grok") == 180
 
 
-def test_run_tripo_asks_for_a_quiet_unattended_generation(workspace):
-    seen: list = []
-    out = workspace / "raw"
-    blog.run_tripo("a prompt", out, runner=fake_tools(seen=seen))
-    assert seen[0][:4] == ["tripo", "generate", "text-to-image", "--no-open"]
-    for flag in ("--yes", "--quiet", "--json", "--no-open"):
-        assert flag in seen[0]
-    assert seen[0][seen[0].index("-o") + 1] == str(out)
-    assert seen[0][-1] == "a prompt"
+def test_providers_and_timeouts_fall_back_when_config_is_silent(monkeypatch):
+    override_config(monkeypatch, image_providers=[], image_timeouts={})
+    assert blog.image_providers() == ["codex", "grok"]
+    assert blog.image_timeout("codex") == 240 and blog.image_timeout("grok") == 180
 
 
-def test_run_tripo_reports_a_task_that_did_not_succeed(workspace):
-    runner = fake_tools(tripo_extra={"status": "failed"})
-    with pytest.raises(RuntimeError, match="rather than a success"):
-        blog.run_tripo("a prompt", workspace / "raw", runner=runner)
+def test_codex_instruction_asks_for_a_wide_hero_saved_as_hero_png():
+    instruction = blog.codex_instruction(blog.compose_prompt("A lighthouse made of circuitry"))
+    assert "wide 16:9 editorial blog hero image" in instruction
+    assert "A lighthouse made of circuitry" in instruction and "#35bdff" in instruction
+    assert "No text, no logos." in instruction
+    assert "current directory as hero.png" in instruction
+    assert instruction.endswith("reply with just the absolute path.")
+    assert ".." not in instruction  # the house style already ends in a full stop
 
 
-def test_run_tripo_reports_a_missing_cli(workspace):
-    def runner(*args, **kwargs):
-        raise FileNotFoundError("tripo")
-
-    with pytest.raises(RuntimeError, match="tripo is not installed"):
-        blog.run_tripo("a prompt", workspace / "raw", runner=runner)
+def test_grok_instruction_names_the_file_and_leaves_the_extension_open():
+    instruction = blog.grok_instruction(blog.compose_prompt("A lighthouse made of circuitry"))
+    assert "current directory as hero with the matching file extension" in instruction
+    assert "hero.png or hero.jpg" in instruction
 
 
-def test_run_tripo_reports_a_failed_command(workspace):
-    def runner(*args, **kwargs):
-        return SimpleNamespace(returncode=1, stdout="", stderr="not enough credits")
-
-    with pytest.raises(RuntimeError, match="not enough credits"):
-        blog.run_tripo("a prompt", workspace / "raw", runner=runner)
-
-
-def test_run_tripo_reports_a_timeout(workspace):
-    def runner(command, **kwargs):
-        raise subprocess.TimeoutExpired(command, 600)
-
-    with pytest.raises(RuntimeError, match="took longer than 600 seconds"):
-        blog.run_tripo("a prompt", workspace / "raw", runner=runner)
-
-
-def test_generated_file_prefers_the_generated_image(tmp_path):
-    (tmp_path / "generated_image.png").write_bytes(PNG_BYTES)
-    (tmp_path / "preview.png").write_bytes(PNG_BYTES)
-    found = blog.generated_file({"output_dir": str(tmp_path), "files": ["preview.png"]}, tmp_path)
-    assert found.name == "generated_image.png"
+def test_run_codex_is_headless_and_closes_stdin(workspace):
+    calls: list = []
+    out = workspace / "work"
+    out.mkdir()
+    blog.run_codex("a prompt", out, runner=fake_tools(calls=calls))
+    command = calls[0]["command"]
+    assert command[:4] == ["codex", "exec", "--skip-git-repo-check", "--json"]
+    assert command[command.index("-c") + 1] == "model_reasoning_effort=low"
+    assert command[command.index("-C") + 1] == str(out)
+    assert command[-1] == blog.codex_instruction("a prompt")
+    assert calls[0]["stdin"] == subprocess.DEVNULL  # or codex waits for input forever
+    assert calls[0]["timeout"] == 240
+    assert "cwd" not in calls[0]
 
 
-def test_generated_file_falls_back_to_whatever_tripo_wrote(tmp_path):
+def test_run_grok_runs_inside_the_workdir(workspace):
+    calls: list = []
+    out = workspace / "work"
+    out.mkdir()
+    blog.run_grok("a prompt", out, runner=fake_tools(calls=calls))
+    command = calls[0]["command"]
+    assert command[0] == "grok"
+    assert command[command.index("-p") + 1] == blog.grok_instruction("a prompt")
+    assert "--always-approve" in command
+    assert command[command.index("--output-format") + 1] == "streaming-json"
+    assert calls[0]["cwd"] == str(out)
+    assert calls[0]["stdin"] == subprocess.DEVNULL
+    assert calls[0]["timeout"] == 180
+
+
+def test_a_generator_reports_a_cli_that_is_not_installed(workspace):
+    with pytest.raises(RuntimeError, match="codex is not installed"):
+        blog.run_codex("a prompt", workspace, runner=fake_tools(fails={"codex": "missing"}))
+
+
+def test_a_generator_reports_a_failed_command(workspace):
+    with pytest.raises(RuntimeError, match="usage limit reached"):
+        blog.run_grok("a prompt", workspace, runner=fake_tools(fails={"grok": "error"}))
+
+
+def test_a_generator_reports_a_timeout(workspace):
+    with pytest.raises(RuntimeError, match="took longer than 240 seconds"):
+        blog.run_codex("a prompt", workspace, runner=fake_tools(fails={"codex": "timeout"}))
+
+
+def test_generated_file_prefers_hero_png(tmp_path):
+    (tmp_path / "hero.png").write_bytes(PNG_BYTES)
+    (tmp_path / "hero.jpg").write_bytes(JPEG_BYTES)
+    assert blog.generated_file(tmp_path).name == "hero.png"
+
+
+def test_generated_file_takes_whatever_image_was_saved(tmp_path):
+    (tmp_path / "notes.txt").write_bytes(b"words")
     (tmp_path / "concept.webp").write_bytes(WEBP_BYTES)
-    found = blog.generated_file({"files": ["task.json", "concept.webp"]}, tmp_path)
-    assert found.name == "concept.webp"
+    assert blog.generated_file(tmp_path).name == "concept.webp"
+
+
+def test_generated_file_refuses_a_file_that_is_not_really_an_image(tmp_path):
+    (tmp_path / "hero.png").write_bytes(b"sorry, I could not make that")
+    with pytest.raises(RuntimeError, match="no usable image"):
+        blog.generated_file(tmp_path)
 
 
 def test_generated_file_says_so_when_there_is_no_picture(tmp_path):
-    with pytest.raises(RuntimeError, match="left no image"):
-        blog.generated_file({"files": []}, tmp_path)
+    with pytest.raises(RuntimeError, match="no usable image"):
+        blog.generated_file(tmp_path)
+
+
+def test_generate_with_refuses_a_generator_it_does_not_know(workspace):
+    with pytest.raises(RuntimeError, match="not an image generator"):
+        blog.generate_with("dall-e", "a prompt", workspace / "w", runner=fake_tools())
 
 
 def test_image_size_reads_what_sips_reports(tmp_path):
@@ -520,8 +588,9 @@ def test_image_size_reports_an_answer_it_cannot_read(tmp_path):
 
 
 @pytest.mark.parametrize("size, expected", [
-    ((2048, 2048), (2048, 1152)),   # Tripo's square, cropped to 16:9
-    ((1600, 900), (1600, 900)),     # already 16:9
+    ((1672, 941), (1672, 940)),     # what codex hands back: a hair too tall
+    ((1280, 720), (1280, 720)),     # what grok hands back: already 16:9
+    ((1600, 900), (1600, 900)),     # already the finished size
     ((4000, 1000), (1778, 1000)),   # too wide: keep the height
     ((1000, 4000), (1000, 562)),    # too tall: keep the width
 ])
@@ -536,10 +605,11 @@ def test_crop_box_refuses_a_sizeless_image():
 
 def test_convert_for_web_crops_then_resizes_and_cleans_up(tmp_path, workspace):
     seen: list = []
-    source = tmp_path / "generated_image.png"
+    source = tmp_path / "hero.png"
     source.write_bytes(PNG_BYTES)
     destination = tmp_path / "out" / "hero.jpg"
-    result = blog.convert_for_web(source, destination, runner=fake_tools(seen=seen))
+    result = blog.convert_for_web(source, destination,
+                                  runner=fake_tools(source_size=(2048, 2048), seen=seen))
     assert result == destination and destination.is_file()
     crop, resize = seen[1], seen[2]
     assert crop[:4] == ["sips", "-c", "1152", "2048"]      # height then width, as sips wants it
@@ -547,6 +617,17 @@ def test_convert_for_web_crops_then_resizes_and_cleans_up(tmp_path, workspace):
     assert resize[resize.index("-s") + 1:resize.index("-s") + 3] == ["format", "jpeg"]
     assert "82" in resize
     assert not (destination.parent / "hero-crop.png").exists()
+
+
+def test_convert_for_web_skips_the_crop_when_the_picture_is_already_sixteen_by_nine(tmp_path, workspace):
+    seen: list = []
+    source = tmp_path / "hero.png"
+    source.write_bytes(PNG_BYTES)
+    destination = tmp_path / "hero.jpg"
+    blog.convert_for_web(source, destination,
+                         runner=fake_tools(source_size=(1280, 720), seen=seen))
+    assert [c[1] for c in seen] == ["-g", "-z"]            # measured, then resized: no crop
+    assert seen[1][seen[1].index("--out") - 1] == str(source)
 
 
 def test_convert_for_web_clears_the_crop_even_when_sips_fails(tmp_path, workspace):
@@ -575,31 +656,82 @@ def test_image_filename_says_when_it_was_made_and_ends_in_jpg():
     assert name != blog.image_filename("another prompt", now=lambda: datetime(2026, 9, 22, 14, 30, 15))
 
 
-def test_make_image_returns_a_web_ready_path_under_the_working_directory(workspace):
+AT_HALF_TWO = lambda: datetime(2026, 9, 22, 14, 30, 15)  # noqa: E731 - a stand-in clock
+
+
+def test_make_image_uses_codex_first_and_returns_a_web_ready_path(workspace):
     seen: list = []
     result = blog.make_image("A lighthouse made of circuitry", runner=fake_tools(seen=seen),
-                             now=lambda: datetime(2026, 9, 22, 14, 30, 15))
+                             now=AT_HALF_TWO)
     path = Path(result["image_path"])
     assert path.is_file() and path.suffix == ".jpg"
     assert path.parent == (workspace / "blog-images")
+    assert result["provider"] == "codex" and result["fell_back_from"] == []
     assert result["width"] == 1600 and result["height"] == 900
     assert result["bytes"] == len(JPEG_BYTES)
-    assert result["credits_consumed"] == 5
     assert "#35bdff" in result["prompt"]
-    assert [c[0] for c in seen] == ["tripo", "sips", "sips", "sips"]  # one generation, no more
+    assert "codex" in result["note"]
+    assert [c[0] for c in seen] == ["codex", "sips", "sips", "sips"]  # one generation, no more
+    assert Path(result["original"]).name == "hero.png"
+
+
+@pytest.mark.parametrize("mode", ["error", "timeout", "missing", "nothing", "junk"])
+def test_make_image_falls_back_to_grok_when_codex_does_not_deliver(workspace, mode):
+    seen: list = []
+    result = blog.make_image("A lighthouse", runner=fake_tools(seen=seen, fails={"codex": mode}),
+                             now=AT_HALF_TWO)
+    assert result["provider"] == "grok" and result["fell_back_from"] == ["codex"]
+    assert "fallback" in result["note"] and "codex" in result["note"]
+    assert [c[0] for c in seen][:2] == ["codex", "grok"]
+    assert Path(result["image_path"]).is_file()
+
+
+def test_make_image_gives_each_generation_a_fresh_workdir(workspace):
+    calls: list = []
+    runner = fake_tools(calls=calls, fails={"codex": "nothing"})
+    blog.make_image("A lighthouse", runner=runner, now=AT_HALF_TWO)
+    blog.make_image("A lighthouse", runner=runner, now=AT_HALF_TWO)
+    generators = [c for c in calls if c["command"][0] in ("codex", "grok")]
+    directories = [str(workdir_of(c["command"], c)) for c in generators]
+    assert len(set(directories)) == len(directories) == 4
+    raw = workspace / "blog-images" / "raw"
+    assert all(Path(d).parent == raw for d in directories)
+    assert [Path(d).name.split("-")[0] for d in directories] == ["codex", "grok", "codex", "grok"]
+
+
+def test_make_image_reports_when_no_generator_manages_it(workspace):
+    runner = fake_tools(fails={"codex": "timeout", "grok": "error"})
+    with pytest.raises(RuntimeError, match="No image generator managed") as failure:
+        blog.make_image("A lighthouse", runner=runner, now=AT_HALF_TWO)
+    assert "codex: " in str(failure.value) and "grok: " in str(failure.value)
+
+
+def test_make_image_follows_the_order_in_the_config(workspace, monkeypatch):
+    override_config(monkeypatch, image_providers=["grok"])
+    seen: list = []
+    result = blog.make_image("A lighthouse", runner=fake_tools(seen=seen), now=AT_HALF_TWO)
+    assert result["provider"] == "grok"
+    assert [c[0] for c in seen] == ["grok", "sips", "sips", "sips"]
+
+
+def test_make_image_says_so_when_no_generator_is_configured(workspace, monkeypatch):
+    override_config(monkeypatch, image_providers=["  "])
+    with pytest.raises(RuntimeError, match="image_providers is empty"):
+        blog.make_image("A lighthouse", runner=fake_tools())
 
 
 def test_make_image_never_starts_a_generation_for_an_empty_prompt(workspace):
     def explode(*args, **kwargs):
-        raise AssertionError("make_image must validate before it spends credits")
+        raise AssertionError("make_image must validate before it runs a generator")
 
     with pytest.raises(ValueError, match="Describe the picture"):
         blog.make_image("   ", runner=explode)
 
 
 def test_generate_image_tool_reports_a_failure_instead_of_raising(monkeypatch):
-    monkeypatch.setattr(blog, "make_image", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("tripo is out")))
-    assert blog.generate_image("a lighthouse")["error"] == "tripo is out"
+    monkeypatch.setattr(blog, "make_image",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("both generators failed")))
+    assert blog.generate_image("a lighthouse")["error"] == "both generators failed"
 
 
 # --- reading the blog --------------------------------------------------------------------------

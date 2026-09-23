@@ -1,5 +1,10 @@
 {
   "base_url": "https://johnnycode.ai",
+  "image_providers": ["codex", "grok"],
+  "image_timeouts": {
+    "codex": 240,
+    "grok": 180
+  },
   "image": {
     "working_dir": "~/Library/Application Support/Guppy/blog-images",
     "width": 1600,

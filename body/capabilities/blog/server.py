@@ -4,8 +4,10 @@ The site is its own publisher — no Substack, no rebuild. Posts are written thr
 with a bearer token that lives only in the macOS Keychain (service "guppy-blog", account "guppy")
 and is read at call time. It is never logged, never returned to the Mind, never written to disk.
 
-Every post carries a hero image. `generate_image` makes one with the Tripo CLI and converts it for
-the web with macOS `sips`; `save_draft` refuses to write a post without one.
+Every post carries a hero image. `generate_image` makes one with the Admiral's Codex CLI, falling
+back to the Grok CLI, and converts it for the web with macOS `sips`; `save_draft` refuses to write a
+post without one. Both CLIs run headless on the Admiral's own subscriptions: no API key, no billing
+here. Which generators are tried, and in what order, is config.json's `image_providers`.
 
 Non-secret settings (base url, image size and house style) live in config.json beside this file.
 
@@ -17,7 +19,7 @@ import json
 import re
 import subprocess
 import sys
-import time
+import tempfile
 from datetime import datetime
 from hashlib import sha256
 from pathlib import Path
@@ -36,9 +38,10 @@ KEYCHAIN_SERVICE = "guppy-blog"
 KEYCHAIN_ACCOUNT = "guppy"
 
 TIMEOUT = 60.0
-IMAGE_TIMEOUT = 600  # seconds allowed for one Tripo generation
 SIPS_TIMEOUT = 120
-TRIPO_CREDITS_PER_IMAGE = 5
+HERO_STEM = "hero"  # what both CLIs are told to name the file they save
+DEFAULT_IMAGE_PROVIDERS = ["codex", "grok"]          # used only if config.json says nothing
+DEFAULT_IMAGE_TIMEOUTS = {"codex": 240, "grok": 180}  # seconds for one generation
 
 # The same rules the site enforces, checked here so a mistake never costs a round trip.
 SLUG_RE = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
@@ -79,6 +82,18 @@ def image_settings() -> dict:
 def working_dir() -> Path:
     """Where finished hero images are kept, outside the repository."""
     return Path(image_settings()["working_dir"]).expanduser()
+
+
+def image_providers() -> list[str]:
+    """The image generators to try, in order: Codex first, Grok as the fallback."""
+    configured = config().get("image_providers") or DEFAULT_IMAGE_PROVIDERS
+    return [str(name).strip().lower() for name in configured if str(name).strip()]
+
+
+def image_timeout(provider: str) -> int:
+    """How long one generator gets before Guppy gives up on it and tries the next."""
+    timeouts = config().get("image_timeouts") or {}
+    return int(timeouts.get(provider, DEFAULT_IMAGE_TIMEOUTS.get(provider, 240)))
 
 
 # --- the token ---------------------------------------------------------------------------------
@@ -339,11 +354,17 @@ def compose_prompt(prompt: str) -> str:
     return f"{idea} {style}"
 
 
-def _run(command: list[str], runner: Callable[..., Any] | None, timeout: int, what: str):
+def _run(command: list[str], runner: Callable[..., Any] | None, timeout: int, what: str,
+         *, cwd: Path | None = None, stdin: Any = None):
     """Run one local command, turning every failure into a message that can be said out loud."""
     runner = runner or subprocess.run
+    extra: dict[str, Any] = {}
+    if cwd is not None:
+        extra["cwd"] = str(cwd)
+    if stdin is not None:
+        extra["stdin"] = stdin
     try:
-        done = runner(command, capture_output=True, text=True, timeout=timeout)
+        done = runner(command, capture_output=True, text=True, timeout=timeout, **extra)
     except FileNotFoundError:
         raise RuntimeError(f"{command[0]} is not installed, so {what} is unavailable.") from None
     except subprocess.TimeoutExpired:
@@ -356,45 +377,86 @@ def _run(command: list[str], runner: Callable[..., Any] | None, timeout: int, wh
     return done
 
 
-def parse_tripo_json(stdout: str) -> dict:
-    """Tripo's machine-readable result is the last JSON object it writes to stdout."""
-    for line in reversed([l.strip() for l in (stdout or "").splitlines() if l.strip()]):
-        try:
-            parsed = json.loads(line)
-        except ValueError:
-            continue
-        if isinstance(parsed, dict):
-            return parsed
-    raise RuntimeError("The Tripo CLI did not return a result that could be read.")
+# --- the generators ----------------------------------------------------------------------------
 
-
-def run_tripo(prompt: str, out_dir: Path, runner: Callable[..., Any] | None = None) -> dict:
-    """One text-to-image generation. Costs credits, so it is never run speculatively."""
-    done = _run(
-        ["tripo", "generate", "text-to-image", "--no-open", "--yes", "--quiet", "--json",
-         "-o", str(out_dir), prompt],
-        runner, IMAGE_TIMEOUT, "generating a hero image with Tripo",
+def hero_instruction(prompt: str, *, saved_as: str) -> str:
+    """What either CLI is told to do: make the picture, save it beside itself, say where it is."""
+    idea = " ".join((prompt or "").split()).rstrip(".")
+    return (
+        "Use your image generation tool to create a wide 16:9 editorial blog hero image: "
+        f"{idea}. No text, no logos. Save the generated image into the current directory as "
+        f"{saved_as}, then reply with just the absolute path."
     )
-    result = parse_tripo_json(done.stdout)
-    status = str(result.get("status") or "").lower()
-    if status and status not in ("success", "succeeded", "completed"):
-        raise RuntimeError(f"Tripo finished the image as {status!r} rather than a success.")
-    return result
 
 
-def generated_file(result: dict, out_dir: Path) -> Path:
-    """The picture Tripo just made: generated_image.png, or whatever it actually wrote."""
-    directory = Path(result.get("output_dir") or out_dir)
-    for name in ("generated_image.png", "preview.png"):
-        candidate = directory / name
-        if candidate.is_file():
+def codex_instruction(prompt: str) -> str:
+    return hero_instruction(prompt, saved_as=f"{HERO_STEM}.png")
+
+
+def grok_instruction(prompt: str) -> str:
+    return hero_instruction(
+        prompt,
+        saved_as=(f"{HERO_STEM} with the matching file extension "
+                  f"(for example {HERO_STEM}.png or {HERO_STEM}.jpg)"),
+    )
+
+
+def run_codex(prompt: str, workdir: Path, runner: Callable[..., Any] | None = None) -> None:
+    """The first choice: the Admiral's Codex CLI, headless, working inside workdir."""
+    _run(
+        ["codex", "exec", "--skip-git-repo-check", "--json",
+         "-c", "model_reasoning_effort=low", "-C", str(workdir), codex_instruction(prompt)],
+        runner, image_timeout("codex"), "generating a hero image with Codex",
+        stdin=subprocess.DEVNULL,  # codex sits waiting on stdin unless it is closed
+    )
+
+
+def run_grok(prompt: str, workdir: Path, runner: Callable[..., Any] | None = None) -> None:
+    """The fallback: the Grok CLI, which saves into whatever directory it is run from."""
+    _run(
+        ["grok", "-p", grok_instruction(prompt), "--always-approve",
+         "--output-format", "streaming-json"],
+        runner, image_timeout("grok"), "generating a hero image with Grok",
+        cwd=workdir, stdin=subprocess.DEVNULL,
+    )
+
+
+GENERATORS: dict[str, Callable[..., None]] = {"codex": run_codex, "grok": run_grok}
+
+
+def _first_bytes(path: Path, count: int = 16) -> bytes:
+    with path.open("rb") as handle:
+        return handle.read(count)
+
+
+def generated_file(workdir: Path) -> Path:
+    """The picture a CLI just saved: hero.png for choice, any real image it left otherwise."""
+    wanted = [workdir / f"{HERO_STEM}{suffix}" for suffix in (".png", ".jpg", ".jpeg", ".webp")]
+    strays = sorted(
+        path for path in (workdir.iterdir() if workdir.is_dir() else [])
+        if path.is_file() and path.suffix.lower() in IMAGE_SUFFIXES and path not in wanted
+    )
+    for candidate in wanted + strays:
+        if candidate.is_file() and sniff_image(_first_bytes(candidate)) is not None:
             return candidate
-    for name in result.get("files") or []:
-        candidate = directory / str(name)
-        if candidate.suffix.lower() in IMAGE_SUFFIXES and candidate.is_file():
-            return candidate
-    raise RuntimeError(f"Tripo reported success but left no image in {directory}.")
+    raise RuntimeError(f"it saved no usable image in {workdir}")
 
+
+def generate_with(provider: str, prompt: str, workdir: Path,
+                  runner: Callable[..., Any] | None = None) -> Path:
+    """Run one generator in a workdir of its own and hand back the image it saved."""
+    generate = GENERATORS.get(provider)
+    if generate is None:
+        raise RuntimeError(
+            f"{provider!r} is not an image generator Guppy knows; config.json's image_providers "
+            f"takes {' and '.join(sorted(GENERATORS))}."
+        )
+    workdir.mkdir(parents=True, exist_ok=True)
+    generate(prompt, workdir, runner)
+    return generated_file(workdir)
+
+
+# --- making it web-ready -----------------------------------------------------------------------
 
 def image_size(path: Path, runner: Callable[..., Any] | None = None) -> tuple[int, int]:
     """The pixel size of an image, as sips reports it."""
@@ -417,23 +479,28 @@ def crop_box(width: int, height: int, ratio_width: int, ratio_height: int) -> tu
 
 def convert_for_web(source: Path, destination: Path,
                     runner: Callable[..., Any] | None = None) -> Path:
-    """Crop to 16:9 and resize to the configured JPEG, so it lands well under the site's 8 MB."""
+    """Resize to the configured JPEG, cropping to 16:9 first only when it is not already 16:9."""
     settings = image_settings()
     width, height = int(settings["width"]), int(settings["height"])
     quality = int(settings["quality"])
     source_width, source_height = image_size(source, runner)
     crop_width, crop_height = crop_box(source_width, source_height, width, height)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    cropped = destination.with_name(destination.stem + "-crop.png")
+    needs_crop = (crop_width, crop_height) != (source_width, source_height)
+    cropped = destination.with_name(destination.stem + "-crop.png") if needs_crop else None
     try:
-        # sips takes a crop as height then width, and crops from the centre.
-        _run(["sips", "-c", str(crop_height), str(crop_width), str(source), "--out", str(cropped)],
-             runner, SIPS_TIMEOUT, "cropping the image to 16 by 9")
+        resize_from = source
+        if cropped is not None:
+            # sips takes a crop as height then width, and crops from the centre.
+            _run(["sips", "-c", str(crop_height), str(crop_width), str(source), "--out", str(cropped)],
+                 runner, SIPS_TIMEOUT, "cropping the image to 16 by 9")
+            resize_from = cropped
         _run(["sips", "-z", str(height), str(width), "-s", "format", "jpeg",
-              "-s", "formatOptions", str(quality), str(cropped), "--out", str(destination)],
+              "-s", "formatOptions", str(quality), str(resize_from), "--out", str(destination)],
              runner, SIPS_TIMEOUT, "resizing the image for the web")
     finally:
-        cropped.unlink(missing_ok=True)
+        if cropped is not None:
+            cropped.unlink(missing_ok=True)
     if not destination.is_file():
         raise RuntimeError(f"sips did not produce {destination.name}.")
     return destination
@@ -448,27 +515,40 @@ def image_filename(prompt: str, now: Callable[[], datetime] = datetime.now) -> s
 
 def make_image(prompt: str, *, runner: Callable[..., Any] | None = None,
                now: Callable[[], datetime] = datetime.now) -> dict:
-    """Generate one hero image and hand back a web-ready local path. Spends Tripo credits."""
+    """Generate one hero image with the first generator that manages it, web-ready on disk."""
     full_prompt = compose_prompt(prompt)
+    providers = image_providers()
+    if not providers:
+        raise RuntimeError("No image generators are configured; config.json's image_providers is empty.")
     directory = working_dir()
-    raw_dir = directory / "raw" / str(int(time.time()))
-    directory.mkdir(parents=True, exist_ok=True)
-    raw_dir.mkdir(parents=True, exist_ok=True)
-    result = run_tripo(full_prompt, raw_dir, runner)
-    original = generated_file(result, raw_dir)
-    destination = convert_for_web(original, directory / image_filename(full_prompt, now), runner)
-    size = destination.stat().st_size
-    settings = image_settings()
-    return {
-        "image_path": str(destination),
-        "width": int(settings["width"]),
-        "height": int(settings["height"]),
-        "bytes": size,
-        "prompt": full_prompt,
-        "original": str(original),
-        "credits_consumed": result.get("credits_consumed", TRIPO_CREDITS_PER_IMAGE),
-        "note": "Pass this image_path to save_draft. Generating another one costs more Tripo credits.",
-    }
+    raw_root = directory / "raw"
+    raw_root.mkdir(parents=True, exist_ok=True)
+    troubles: list[str] = []
+    for provider in providers:
+        # A fresh workdir per generation, so one CLI never picks up another's leftovers.
+        workdir = Path(tempfile.mkdtemp(prefix=f"{provider}-", dir=str(raw_root)))
+        try:
+            original = generate_with(provider, full_prompt, workdir, runner)
+        except (RuntimeError, ValueError) as e:
+            troubles.append(f"{provider}: {e}")
+            continue
+        destination = convert_for_web(original, directory / image_filename(full_prompt, now), runner)
+        settings = image_settings()
+        note = f"Made with the {provider} CLI. Pass this image_path to save_draft."
+        if troubles:
+            note += " It was the fallback: " + "; ".join(troubles) + "."
+        return {
+            "image_path": str(destination),
+            "provider": provider,
+            "width": int(settings["width"]),
+            "height": int(settings["height"]),
+            "bytes": destination.stat().st_size,
+            "prompt": full_prompt,
+            "original": str(original),
+            "fell_back_from": [t.split(":", 1)[0] for t in troubles],
+            "note": note,
+        }
+    raise RuntimeError("No image generator managed a hero image — " + "; ".join(troubles))
 
 
 # --- writing -----------------------------------------------------------------------------------
@@ -537,7 +617,8 @@ def get_post(slug: str) -> dict:
 def generate_image(prompt: str) -> dict:
     """Make a hero image for a post and return its local path (1600x900 JPEG, JohnnyCode.ai style).
 
-    Each call spends 5 Tripo credits, so generate once per post unless the Admiral asks for another.
+    Drawn by the Admiral's Codex CLI, falling back to Grok; the result says which one made it.
+    One generation takes a minute or two, so make one per post unless the Admiral asks for another.
     """
     try:
         return make_image(prompt)
